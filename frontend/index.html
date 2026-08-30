@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Virtualis 对接</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 24px;
+        font: 14px/1.8 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      code {
+        background: rgba(127, 127, 127, 0.15);
+        border-radius: 4px;
+        padding: 1px 6px;
+        font-size: 12px;
+      }
+      ol { padding-left: 20px; }
+      li { margin: 6px 0; }
+      .card {
+        max-width: 720px;
+        border: 1px solid rgba(127, 127, 127, 0.3);
+        border-radius: 10px;
+        padding: 16px 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Virtualis 对接插件</h1>
+      <p>让本站商品可以直接在上游 Virtualis 弹性云主机系统上开通（容器 / 虚拟机）。</p>
+      <ol>
+        <li>
+          在 <strong>接口管理</strong> 新增接口：模块选择「Virtualis 对接」，
+          填写上游 <code>Virtualis 地址</code> 与 <code>API 密钥</code>，并点击测试确认连通。
+        </li>
+        <li>
+          在 <strong>商品管理</strong> 新建商品：接口选择刚添加的接口，
+          驱动选 <code>Incus</code>（容器）或 <code>QEMU</code>（虚拟机），
+          配置类型选「弹性云」（设定各项规格的最小/最大值，用户购买时自选）
+          或「管理员固定配置」。
+        </li>
+        <li>
+          用户购买时选择规格与系统镜像（Incus 只能装 Incus 镜像，QEMU 只能装 QEMU 镜像），
+          支付后自动在上游开通实例；已购服务支持开机 / 关机 / 重启。
+        </li>
+      </ol>
+      <p>
+        上游需开放 <code>/api/v1</code> 机器 API（API Key 鉴权），
+        密钥在 Virtualis 后台「安全 → API 密钥」生成。
+      </p>
+    </div>
+  </body>
+</html>
