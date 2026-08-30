@@ -24,7 +24,11 @@ Virtualis 主控需开放 `/api/v1` 机器 API（`X-Virtualis-Api-Key` 鉴权，
 ## 构建
 
 ```bash
-./build.sh   # 产物：dist/virtualis-<os>-<arch>.zip
+./build.sh   # macOS / Linux，产物：dist/virtualis-<os>-<arch>.zip
+```
+
+```bat
+build.cmd    # Windows（双击或 cmd 运行），产物同上
 ```
 
 > go.mod 通过 `replace ../levis` 引用插件 SDK，构建需同级目录存在 levis 仓库。
