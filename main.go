@@ -303,8 +303,7 @@ func (p *virtualisPlugin) ListProducts(ctx context.Context, req *pb.ListProducts
 		return nil, err
 	}
 	// 用一个轻量请求验证地址与密钥可用。
-	var images []v1Image
-	if err := p.apiGet(ctx, creds, "/images", &images); err != nil {
+	if _, err := p.listImages(ctx, creds, ""); err != nil {
 		return &pb.ListProductsReply{Error: err.Error()}, nil
 	}
 	return &pb.ListProductsReply{Products: []*pb.UpstreamProduct{}, Total: 0}, nil
@@ -351,10 +350,22 @@ func instanceName(remark string) string {
 	return fmt.Sprintf("lv-%s-%04x", name, rand.Intn(0xffff))
 }
 
+// listImages 拉取指定驱动的镜像列表。/api/v1/images 返回分页外壳
+// {"items":[...]}，这里统一解包。
+func (p *virtualisPlugin) listImages(ctx context.Context, creds *credentials, driver string) ([]v1Image, error) {
+	var page struct {
+		Items []v1Image `json:"items"`
+	}
+	if err := p.apiGet(ctx, creds, "/images?driver="+driver, &page); err != nil {
+		return nil, err
+	}
+	return page.Items, nil
+}
+
 // pickImage 没有指定镜像时按驱动自选一个可用镜像。
 func (p *virtualisPlugin) pickImage(ctx context.Context, creds *credentials, driver string) (uint, string, error) {
-	var images []v1Image
-	if err := p.apiGet(ctx, creds, "/images?driver="+driver, &images); err != nil {
+	images, err := p.listImages(ctx, creds, driver)
+	if err != nil {
 		return 0, "", err
 	}
 	for _, image := range images {
@@ -494,7 +505,11 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 
 	case pb.HostAction_HOST_ACTION_TERMINATE:
 		if err := p.apiDo(ctx, http.MethodDelete, creds, "/instances/"+hostID, nil, nil); err != nil {
-			return &pb.ManageHostReply{Error: err.Error()}, nil
+			// 删除要幂等：上游已经没有这个实例（重复删除、本地残留补偿）
+			// 视为成功，否则本地会永远删不掉。
+			if !strings.Contains(err.Error(), "not found") {
+				return &pb.ManageHostReply{Error: err.Error()}, nil
+			}
 		}
 		return &pb.ManageHostReply{Success: true}, nil
 
@@ -570,8 +585,8 @@ func (p *virtualisPlugin) ListProductOS(ctx context.Context, req *pb.ListProduct
 
 // listOS 拉取指定驱动的可用镜像列表。
 func (p *virtualisPlugin) listOS(ctx context.Context, creds *credentials, driver string) (*pb.ListHostOSReply, error) {
-	var images []v1Image
-	if err := p.apiGet(ctx, creds, "/images?driver="+driver, &images); err != nil {
+	images, err := p.listImages(ctx, creds, driver)
+	if err != nil {
 		return &pb.ListHostOSReply{Error: err.Error()}, nil
 	}
 	out := make([]*pb.OSImage, 0, len(images))
