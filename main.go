@@ -227,9 +227,9 @@ func (p *virtualisPlugin) apiDo(ctx context.Context, method string, creds *crede
 		return fmt.Errorf("读取上游响应失败: %w", err)
 	}
 
-	// Virtualis 是 REST 风格：成功 200 直接给数据，失败 4xx/5xx 给
-	// {code, message}。非 200 一律把 message 提出来当业务错误。
-	if resp.StatusCode != http.StatusOK {
+	// Virtualis 是 REST 风格：所有 2xx 都表示成功，失败 4xx/5xx 给
+	// {code, message}。204 等无正文响应直接成功。
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		var errBody struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
@@ -275,19 +275,52 @@ type v1Spec struct {
 }
 
 type v1Network struct {
-	Mode          string `json:"mode"`
-	BandwidthMbps int    `json:"bandwidth_mbps,omitempty"`
+	Mode          string   `json:"mode"`
+	Bridge        string   `json:"bridge,omitempty"`
+	MAC           string   `json:"mac,omitempty"`
+	IPv4          string   `json:"ipv4,omitempty"`
+	Gateway       string   `json:"gateway,omitempty"`
+	DNS           []string `json:"dns,omitempty"`
+	BandwidthMbps int      `json:"bandwidth_mbps,omitempty"`
+}
+
+type v1NetworkStatus struct {
+	Reachable  bool                 `json:"reachable"`
+	LatencyMS  float64              `json:"latency_ms"`
+	Interfaces []v1NetworkInterface `json:"interfaces"`
+}
+
+type v1NetworkInterface struct {
+	Name string   `json:"name"`
+	IPv4 []string `json:"ipv4"`
+	IPv6 []string `json:"ipv6"`
+	MAC  string   `json:"mac"`
 }
 
 type v1Instance struct {
-	ID      uint      `json:"id"`
-	Name    string    `json:"name"`
-	Driver  string    `json:"driver"`
-	Type    string    `json:"type"`
-	Status  string    `json:"status"`
-	Spec    v1Spec    `json:"spec"`
-	Network v1Network `json:"network"`
-	IP      string    `json:"ip"`
+	ID          uint       `json:"id"`
+	Name        string     `json:"name"`
+	Driver      string     `json:"driver"`
+	Type        string     `json:"type"`
+	Status      string     `json:"status"`
+	Spec        v1Spec     `json:"spec"`
+	Network     v1Network  `json:"network"`
+	IP          string     `json:"ip"`
+	ObservedIP  string     `json:"observed_ip"`
+	SSHPassword string     `json:"ssh_password"`
+	SSHReady    bool       `json:"ssh_ready"`
+	NATMappings []v1NATMap `json:"nat_mappings"`
+	Agent       *v1Agent   `json:"agent"`
+}
+
+type v1Agent struct {
+	IP string `json:"ip"`
+}
+
+type v1NATMap struct {
+	Protocol  string `json:"protocol"`
+	HostPort  int    `json:"host_port"`
+	GuestPort int    `json:"guest_port"`
 }
 
 // =============================================================================
@@ -503,6 +536,15 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 	case pb.HostAction_HOST_ACTION_REBOOT:
 		return p.power(ctx, creds, hostID, "restart")
 
+	case pb.HostAction_HOST_ACTION_HARD_BOOT:
+		return p.power(ctx, creds, hostID, "hard_start")
+
+	case pb.HostAction_HOST_ACTION_HARD_STOP:
+		return p.power(ctx, creds, hostID, "hard_stop")
+
+	case pb.HostAction_HOST_ACTION_HARD_RESTART:
+		return p.power(ctx, creds, hostID, "hard_restart")
+
 	case pb.HostAction_HOST_ACTION_TERMINATE:
 		if err := p.apiDo(ctx, http.MethodDelete, creds, "/instances/"+hostID, nil, nil); err != nil {
 			// 删除要幂等：上游已经没有这个实例（重复删除、本地残留补偿）
@@ -514,7 +556,11 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 		return &pb.ManageHostReply{Success: true}, nil
 
 	case pb.HostAction_HOST_ACTION_REINSTALL:
-		return &pb.ManageHostReply{Error: "Virtualis 暂不支持经接口重装系统，请在上游操作"}, nil
+		osID := strings.TrimSpace(req.GetOs())
+		if osID == "" || osID == "0" {
+			return &pb.ManageHostReply{Error: "重装系统必须指定镜像 ID"}, nil
+		}
+		return p.powerWithImage(ctx, creds, hostID, "reinstall", osID)
 
 	default:
 		return &pb.ManageHostReply{Error: "不支持的操作类型"}, nil
@@ -524,6 +570,24 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 // power 执行电源操作并轮询确认（上游 PowerInstance 同步等待结果）。
 func (p *virtualisPlugin) power(ctx context.Context, creds *credentials, hostID, action string) (*pb.ManageHostReply, error) {
 	if err := p.apiPost(ctx, creds, "/instances/"+hostID+"/power", map[string]any{"action": action}, nil); err != nil {
+		// Older Virtualis masters only know the soft action names. Preserve a
+		// useful compatibility fallback for hard boot, which is equivalent there.
+		if action == "hard_start" {
+			if fallbackErr := p.apiPost(ctx, creds, "/instances/"+hostID+"/power", map[string]any{"action": "start"}, nil); fallbackErr == nil {
+				return &pb.ManageHostReply{Success: true}, nil
+			}
+		}
+		return &pb.ManageHostReply{Error: err.Error()}, nil
+	}
+	return &pb.ManageHostReply{Success: true}, nil
+}
+
+func (p *virtualisPlugin) powerWithImage(ctx context.Context, creds *credentials, hostID, action, imageID string) (*pb.ManageHostReply, error) {
+	id, err := strconv.ParseUint(imageID, 10, 64)
+	if err != nil || id == 0 {
+		return &pb.ManageHostReply{Error: "镜像 ID 无效"}, nil
+	}
+	if err := p.apiPost(ctx, creds, "/instances/"+hostID+"/power", map[string]any{"action": action, "image_id": id}, nil); err != nil {
 		return &pb.ManageHostReply{Error: err.Error()}, nil
 	}
 	return &pb.ManageHostReply{Success: true}, nil
@@ -543,21 +607,89 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 		name = fmt.Sprintf("实例 #%s", req.GetHostId())
 	}
 	spec := fmt.Sprintf("%d 核 / %d MB / %d GB", instance.Spec.CPU, instance.Spec.MemoryMB, instance.Spec.DiskGB)
+	ip := instance.ObservedIP
+	if ip == "" {
+		ip = instance.IP
+	}
+	sshHost, sshPort := ip, int32(22)
+	if instance.Network.Mode == "nat" {
+		sshHost, sshPort = "", 0
+		if instance.Agent != nil {
+			sshHost = instance.Agent.IP
+		}
+		for _, mapping := range instance.NATMappings {
+			if mapping.Protocol == "tcp" && mapping.GuestPort == 22 {
+				sshPort = int32(mapping.HostPort)
+				break
+			}
+		}
+	}
+	resources := &pb.HostResources{
+		Cpu: int32(instance.Spec.CPU), MemoryMb: int64(instance.Spec.MemoryMB),
+		DiskGb: int64(instance.Spec.DiskGB), BandwidthMbps: int64(instance.Network.BandwidthMbps),
+	}
+	network := &pb.HostNetwork{
+		Mode: instance.Network.Mode, Ipv4: ip, Mac: instance.Network.MAC,
+		Gateway: instance.Network.Gateway, Dns: append([]string(nil), instance.Network.DNS...),
+	}
+	ssh := &pb.HostSSH{Host: sshHost, Port: sshPort, Username: "root", Password: instance.SSHPassword, Ready: instance.SSHReady}
 	return &pb.GetHostReply{
 		Host: &pb.UpstreamHost{
-			Id:          req.GetHostId(),
-			ProductName: fmt.Sprintf("%s（%s）", name, spec),
-			Status:      v1Status(instance.Status),
-			// Virtualis 无上游到期概念，到期一律由本地计费周期管理。
-			Expiry: "",
-			// 重装暂不支持，不进操作列表，前端按钮自动隐藏。
-			Actions: []string{"boot", "shutdown", "reboot"},
+			Id: req.GetHostId(), ProductName: fmt.Sprintf("%s（%s）", name, spec),
+			Status: v1Status(instance.Status), Actions: []string{"boot", "shutdown", "reboot", "hard_boot", "hard_stop", "hard_restart", "reinstall"},
+			Resources: resources, Network: network, Ssh: ssh,
+			Cpu: int32(instance.Spec.CPU), MemoryMb: int64(instance.Spec.MemoryMB), DiskGb: int64(instance.Spec.DiskGB),
+			BandwidthMbps: int64(instance.Network.BandwidthMbps), Ipv4: ip,
+			SshHost: sshHost, SshPort: sshPort, SshUsername: "root", SshPassword: instance.SSHPassword, SshReady: instance.SSHReady,
 		},
 	}, nil
 }
 
 // ListHostOS 返回该实例所用驱动下的可用镜像（重装场景；当前 ManageHost
 // 不支持重装，保留接口兼容）。
+func (p *virtualisPlugin) GetHostMetrics(ctx context.Context, req *pb.GetHostMetricsRequest) (*pb.GetHostMetricsReply, error) {
+	creds, err := credsFromConfig(req.GetInterfaceConfig())
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Metrics struct {
+			CPUPercent     float64 `json:"cpu_percent"`
+			MemoryUsedMB   int64   `json:"memory_used_mb"`
+			MemoryTotalMB  int64   `json:"memory_total_mb"`
+			NetworkRxBytes uint64  `json:"network_rx_bytes"`
+			NetworkTxBytes uint64  `json:"network_tx_bytes"`
+			BandwidthRxBps float64 `json:"bandwidth_rx_bps"`
+			BandwidthTxBps float64 `json:"bandwidth_tx_bps"`
+			CollectedAt    string  `json:"collected_at"`
+		} `json:"metrics"`
+	}
+	if err := p.apiGet(ctx, creds, "/instances/"+req.GetHostId()+"/metrics", &out); err != nil {
+		return &pb.GetHostMetricsReply{Error: err.Error()}, nil
+	}
+	return &pb.GetHostMetricsReply{Metrics: &pb.HostMetrics{
+		CpuPercent: out.Metrics.CPUPercent, MemoryUsedMb: out.Metrics.MemoryUsedMB,
+		MemoryTotalMb: out.Metrics.MemoryTotalMB, NetworkRxBytes: out.Metrics.NetworkRxBytes,
+		NetworkTxBytes: out.Metrics.NetworkTxBytes, BandwidthRxBps: out.Metrics.BandwidthRxBps,
+		BandwidthTxBps: out.Metrics.BandwidthTxBps, CollectedAt: out.Metrics.CollectedAt,
+	}}, nil
+}
+
+func (p *virtualisPlugin) GetHostAccess(ctx context.Context, req *pb.GetHostAccessRequest) (*pb.GetHostAccessReply, error) {
+	creds, err := credsFromConfig(req.GetInterfaceConfig())
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Network *pb.HostNetwork `json:"network"`
+		SSH     *pb.HostSSH     `json:"ssh"`
+	}
+	if err := p.apiGet(ctx, creds, "/instances/"+req.GetHostId()+"/access", &out); err != nil {
+		return &pb.GetHostAccessReply{Error: err.Error()}, nil
+	}
+	return &pb.GetHostAccessReply{Network: out.Network, Ssh: out.SSH}, nil
+}
+
 func (p *virtualisPlugin) ListHostOS(ctx context.Context, req *pb.ListHostOSRequest) (*pb.ListHostOSReply, error) {
 	creds, err := credsFromConfig(req.GetInterfaceConfig())
 	if err != nil {
