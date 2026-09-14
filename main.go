@@ -633,6 +633,21 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 		Gateway: instance.Network.Gateway, Dns: append([]string(nil), instance.Network.DNS...),
 	}
 	ssh := &pb.HostSSH{Host: sshHost, Port: sshPort, Username: "root", Password: instance.SSHPassword, Ready: instance.SSHReady}
+	// 访问信息以 /access 为准：主控在未就绪时会先对账一次被控状态，
+	// NAT 机器的连接地址（host:port）与 ready 只有这里才是实时事实。
+	var access struct {
+		Network *pb.HostNetwork `json:"network"`
+		SSH     *pb.HostSSH     `json:"ssh"`
+	}
+	if err := p.apiGet(ctx, creds, "/instances/"+req.GetHostId()+"/access", &access); err == nil {
+		if access.SSH != nil && access.SSH.Host != "" {
+			ssh = access.SSH
+		}
+		if access.Network != nil && access.Network.Ipv4 != "" {
+			ip = access.Network.Ipv4
+			network.Ipv4 = ip
+		}
+	}
 	return &pb.GetHostReply{
 		Host: &pb.UpstreamHost{
 			Id: req.GetHostId(), ProductName: fmt.Sprintf("%s（%s）", name, spec),
@@ -640,7 +655,7 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 			Resources: resources, Network: network, Ssh: ssh,
 			Cpu: int32(instance.Spec.CPU), MemoryMb: int64(instance.Spec.MemoryMB), DiskGb: int64(instance.Spec.DiskGB),
 			BandwidthMbps: int64(instance.Network.BandwidthMbps), Ipv4: ip,
-			SshHost: sshHost, SshPort: sshPort, SshUsername: "root", SshPassword: instance.SSHPassword, SshReady: instance.SSHReady,
+			SshHost: ssh.Host, SshPort: ssh.Port, SshUsername: ssh.Username, SshPassword: ssh.Password, SshReady: ssh.Ready,
 		},
 	}, nil
 }
