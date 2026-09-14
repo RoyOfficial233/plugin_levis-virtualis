@@ -16,6 +16,8 @@
 //	DELETE /api/v1/instances/:id     删除实例
 //	POST   /api/v1/instances/:id/power 电源操作（start/stop/restart）
 //
+//	POST   /api/v1/instances/:id/vnc-ticket VNC 一次性短票（GetHostVNC 用）
+//
 // 购买选配（弹性云）经 CreateOrder 的 options 传入：
 //
 //	driver（incus/qemu）、cpu、memory_mb、disk_gb、bandwidth_mbps、
@@ -31,6 +33,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -703,6 +706,44 @@ func (p *virtualisPlugin) GetHostAccess(ctx context.Context, req *pb.GetHostAcce
 		return &pb.GetHostAccessReply{Error: err.Error()}, nil
 	}
 	return &pb.GetHostAccessReply{Network: out.Network, Ssh: out.SSH}, nil
+}
+
+func (p *virtualisPlugin) GetHostVNC(ctx context.Context, req *pb.GetHostVNCRequest) (*pb.GetHostVNCReply, error) {
+	creds, err := credsFromConfig(req.GetInterfaceConfig())
+	if err != nil {
+		return nil, err
+	}
+	// 短票由主控签发（120 秒有效、一次性），ws 地址按接口地址推导：
+	// 主程序拿到 ticket 后用自己的通道（同源代理）建连，不直接暴露给浏览器。
+	var issued struct {
+		Ticket    string `json:"ticket"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if err := p.apiPost(ctx, creds, "/instances/"+req.GetHostId()+"/vnc-ticket", nil, &issued); err != nil {
+		return &pb.GetHostVNCReply{Vnc: &pb.HostVNC{Available: false, Message: err.Error()}}, nil
+	}
+	if issued.Ticket == "" {
+		return &pb.GetHostVNCReply{Vnc: &pb.HostVNC{Available: false, Message: "上游未签发 VNC 短票"}}, nil
+	}
+	wsURL := vncWebSocketURL(creds.apiURL, req.GetHostId(), issued.Ticket)
+	return &pb.GetHostVNCReply{Vnc: &pb.HostVNC{
+		Available: true, WsUrl: wsURL, Ticket: issued.Ticket, ExpiresAt: issued.ExpiresAt,
+	}}, nil
+}
+
+// vncWebSocketURL 把接口的 http(s) 地址换成对应 ws(s) 的短票通道。
+func vncWebSocketURL(apiURL, hostID, ticket string) string {
+	base := strings.TrimRight(strings.TrimSpace(apiURL), "/")
+	lower := strings.ToLower(base)
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		base = "wss://" + base[len("https://"):]
+	case strings.HasPrefix(lower, "http://"):
+		base = "ws://" + base[len("http://"):]
+	default:
+		base = "ws://" + base
+	}
+	return base + "/api/instances/" + hostID + "/vnc/ws-ticket?ticket=" + url.QueryEscape(ticket)
 }
 
 func (p *virtualisPlugin) ListHostOS(ctx context.Context, req *pb.ListHostOSRequest) (*pb.ListHostOSReply, error) {
