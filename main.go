@@ -34,6 +34,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -279,6 +280,9 @@ type v1Spec struct {
 	MemoryMB int    `json:"memory_mb"`
 	DiskGB   int    `json:"disk_gb"`
 	Arch     string `json:"arch,omitempty"`
+	// CPUMilli 是毫核配额（500 = 0.5 核）。0 表示整核实例；CPU 字段
+	// 此时存向上取整的整核数，供旧版主控/面板显示兼容。
+	CPUMilli int `json:"cpu_milli,omitempty"`
 }
 
 type v1Network struct {
@@ -370,6 +374,28 @@ func optionInt(options map[string]string, key string, def int) int {
 	return value
 }
 
+// optionCPUMilli 把 options 里的 CPU 选项解析成毫核（0.5 核 = 500）。
+// 允许小数核；缺失/非法回退到默认 1 整核。
+func optionCPUMilli(options map[string]string, key string) int {
+	raw := strings.TrimSpace(options[key])
+	if raw == "" {
+		return 1000
+	}
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || value <= 0 {
+		return 1000
+	}
+	return int(math.Round(value * 1000))
+}
+
+// cpuLabel 供展示：毫核实例显示 0.5 核 这类小数，其余显示整核。
+func cpuLabel(milli, cores int) string {
+	if milli > 0 && milli%1000 != 0 {
+		return strconv.FormatFloat(float64(milli)/1000, 'f', -1, 64)
+	}
+	return strconv.Itoa(cores)
+}
+
 // instanceName 依据订单号生成上游实例名：小写字母/数字/短横线，
 // 且带随机后缀避免同单多台或重开时撞唯一索引。
 func instanceName(remark string) string {
@@ -430,10 +456,11 @@ func (p *virtualisPlugin) CreateOrder(ctx context.Context, req *pb.CreateOrderRe
 		driver = "incus"
 	}
 
-	cpu := optionInt(options, "cpu", 1)
+	cpuMilli := optionCPUMilli(options, "cpu")
+	cpu := (cpuMilli + 999) / 1000
 	memoryMB := optionInt(options, "memory_mb", 512)
 	diskGB := optionInt(options, "disk_gb", 10)
-	if cpu < 1 {
+	if cpuMilli < 100 {
 		return &pb.CreateOrderReply{Error: "CPU 核数必须大于零"}, nil
 	}
 	if memoryMB < 16 {
@@ -458,7 +485,7 @@ func (p *virtualisPlugin) CreateOrder(ctx context.Context, req *pb.CreateOrderRe
 		"name":     instanceName(req.GetRemark()),
 		"driver":   driver,
 		"type":     "container",
-		"spec":     v1Spec{CPU: cpu, MemoryMB: memoryMB, DiskGB: diskGB},
+		"spec":     v1Spec{CPU: cpu, CPUMilli: cpuMilli, MemoryMB: memoryMB, DiskGB: diskGB},
 		"network":  v1Network{Mode: "nat", BandwidthMbps: optionInt(options, "bandwidth_mbps", 0)},
 		"image_id": imageID,
 	}
@@ -634,7 +661,7 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 	if name == "" {
 		name = fmt.Sprintf("实例 #%s", req.GetHostId())
 	}
-	spec := fmt.Sprintf("%d 核 / %d MB / %d GB", instance.Spec.CPU, instance.Spec.MemoryMB, instance.Spec.DiskGB)
+	spec := fmt.Sprintf("%s 核 / %d MB / %d GB", cpuLabel(instance.Spec.CPUMilli, instance.Spec.CPU), instance.Spec.MemoryMB, instance.Spec.DiskGB)
 	ip := instance.ObservedIP
 	if ip == "" {
 		ip = instance.IP
@@ -653,7 +680,8 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 		}
 	}
 	resources := &pb.HostResources{
-		Cpu: int32(instance.Spec.CPU), MemoryMb: int64(instance.Spec.MemoryMB),
+		Cpu: int32(instance.Spec.CPU), CpuMilli: int32(instance.Spec.CPUMilli),
+		MemoryMb: int64(instance.Spec.MemoryMB),
 		DiskGb: int64(instance.Spec.DiskGB), BandwidthMbps: int64(instance.Network.BandwidthMbps),
 	}
 	network := &pb.HostNetwork{
@@ -681,7 +709,8 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 			Id: req.GetHostId(), ProductName: fmt.Sprintf("%s（%s）", name, spec),
 			Status: v1Status(instance.Status), Actions: []string{"boot", "shutdown", "reboot", "hard_boot", "hard_stop", "hard_restart", "reinstall"},
 			Resources: resources, Network: network, Ssh: ssh,
-			Cpu: int32(instance.Spec.CPU), MemoryMb: int64(instance.Spec.MemoryMB), DiskGb: int64(instance.Spec.DiskGB),
+			Cpu: int32(instance.Spec.CPU), CpuMilli: int32(instance.Spec.CPUMilli),
+			MemoryMb: int64(instance.Spec.MemoryMB), DiskGb: int64(instance.Spec.DiskGB),
 			BandwidthMbps: int64(instance.Network.BandwidthMbps), Ipv4: ip,
 			SshHost: ssh.Host, SshPort: ssh.Port, SshUsername: ssh.Username, SshPassword: ssh.Password, SshReady: ssh.Ready,
 		},
