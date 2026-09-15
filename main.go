@@ -22,6 +22,10 @@
 //
 //	driver（incus/qemu）、cpu、memory_mb、disk_gb、bandwidth_mbps、
 //	traffic_gb（上游暂不计量，仅快照展示）、image_id、image_name。
+//
+// 售后流量加购（流量包）不在上游落地：配额只在 Levis 本地 Service.traffic_extra_gb
+// 累加；Levis 结清后会以 ManageHost(action=UNSPECIFIED, os="traffic_gb=N") 做
+// best-effort 通知，插件侧仅记录并返回成功（见 ManageHost）。
 package main
 
 import (
@@ -566,8 +570,29 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 		return p.powerWithImage(ctx, creds, hostID, "reinstall", osID)
 
 	default:
+		if req.GetAction() == pb.HostAction_HOST_ACTION_UNSPECIFIED {
+			if extra, ok := parseTrafficTopUp(req.GetOs()); ok {
+				fmt.Fprintf(os.Stderr, "[virtualis] 流量包记录 host=%s extra_gb=%d\n", hostID, extra)
+				return &pb.ManageHostReply{Success: true}, nil
+			}
+		}
 		return &pb.ManageHostReply{Error: "不支持的操作类型"}, nil
 	}
+}
+
+// parseTrafficTopUp 解析流量包加购通知（os 形如 "traffic_gb=100"，单位 GB）。
+// 上游 Virtualis 不计量流量：Levis 的流量配额只在本地累加，插件侧仅记录。
+// 非该格式的 UNSPECIFIED 调用返回 false，ManageHost 仍报不支持的操作类型。
+func parseTrafficTopUp(osField string) (int, bool) {
+	raw := strings.TrimSpace(osField)
+	if !strings.HasPrefix(raw, "traffic_gb=") {
+		return 0, false
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(raw, "traffic_gb=")))
+	if err != nil || value < 1 || value > 10240 {
+		return 0, false
+	}
+	return value, true
 }
 
 // power 执行电源操作并轮询确认（上游 PowerInstance 同步等待结果）。
