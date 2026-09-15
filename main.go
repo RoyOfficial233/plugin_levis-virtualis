@@ -14,6 +14,8 @@
 //	POST   /api/v1/instances         创建实例（agent_id 缺省自动选节点）
 //	GET    /api/v1/instances/:id     实例详情
 //	DELETE /api/v1/instances/:id     删除实例
+//	POST   /api/v1/instances/:id/nat      新增 NAT 端口转发（host_port 0=自动分配）
+//	DELETE /api/v1/instances/:id/nat/:mid 删除 NAT 端口转发
 //	POST   /api/v1/instances/:id/power 电源操作（start/stop/restart）
 //
 //	POST   /api/v1/instances/:id/vnc-ticket VNC 一次性短票（GetHostVNC 用）
@@ -328,10 +330,14 @@ type v1Agent struct {
 	IP string `json:"ip"`
 }
 
+// v1NATMap 对应上游 model.NATMapping 的 JSON 形态。id/remark 供 NAT 映射
+// 管理使用；实例详情 nat_mappings 与独立 NAT 列表路由共用该结构。
 type v1NATMap struct {
+	ID        uint   `json:"id"`
 	Protocol  string `json:"protocol"`
 	HostPort  int    `json:"host_port"`
 	GuestPort int    `json:"guest_port"`
+	Remark    string `json:"remark"`
 }
 
 // =============================================================================
@@ -682,7 +688,7 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 	resources := &pb.HostResources{
 		Cpu: int32(instance.Spec.CPU), CpuMilli: int32(instance.Spec.CPUMilli),
 		MemoryMb: int64(instance.Spec.MemoryMB),
-		DiskGb: int64(instance.Spec.DiskGB), BandwidthMbps: int64(instance.Network.BandwidthMbps),
+		DiskGb:   int64(instance.Spec.DiskGB), BandwidthMbps: int64(instance.Network.BandwidthMbps),
 	}
 	network := &pb.HostNetwork{
 		Mode: instance.Network.Mode, Ipv4: ip, Mac: instance.Network.MAC,
@@ -798,6 +804,98 @@ func vncWebSocketURL(apiURL, hostID, ticket string) string {
 		base = "ws://" + base
 	}
 	return base + "/api/instances/" + hostID + "/vnc/ws-ticket?ticket=" + url.QueryEscape(ticket)
+}
+
+// =============================================================================
+// NAT 端口映射
+// =============================================================================
+
+// natMappingToPB 把上游 NAT 映射转成协议结构；mapping_id 即上游主键 id，
+// 主程序删除时原样带回。
+func natMappingToPB(m v1NATMap) *pb.HostNATMapping {
+	return &pb.HostNATMapping{
+		MappingId: uint64(m.ID),
+		Protocol:  m.Protocol,
+		HostPort:  int32(m.HostPort),
+		GuestPort: int32(m.GuestPort),
+		Remark:    m.Remark,
+	}
+}
+
+// ListHostNATMappings 列出实例的 NAT 端口映射。独立的列表路由是较新的
+// 主控才有的（同 checkout 的主控只有 POST/DELETE），而实例详情响应始终
+// 携带 nat_mappings，因此列表请求失败时回退详情接口，兼容新旧主控。
+func (p *virtualisPlugin) ListHostNATMappings(ctx context.Context, req *pb.ListHostNATRequest) (*pb.ListHostNATReply, error) {
+	creds, err := credsFromConfig(req.GetInterfaceConfig())
+	if err != nil {
+		return nil, err
+	}
+	var mappings []v1NATMap
+	if err := p.apiGet(ctx, creds, "/instances/"+req.GetHostId()+"/nat", &mappings); err != nil {
+		var instance v1Instance
+		if fallbackErr := p.apiGet(ctx, creds, "/instances/"+req.GetHostId(), &instance); fallbackErr != nil {
+			// 两次都失败时优先暴露列表路由自身的错误（更接近真实原因）。
+			return &pb.ListHostNATReply{Error: err.Error()}, nil
+		}
+		mappings = instance.NATMappings
+	}
+	out := make([]*pb.HostNATMapping, 0, len(mappings))
+	for _, m := range mappings {
+		out = append(out, natMappingToPB(m))
+	}
+	return &pb.ListHostNATReply{Mappings: out}, nil
+}
+
+// CreateHostNATMapping 为实例新增一条 NAT 端口转发。host_port 传 0 表示由
+// 上游自动分配（20000-29999），创建成功后回读映射（含实际分配的宿主端口）。
+func (p *virtualisPlugin) CreateHostNATMapping(ctx context.Context, req *pb.CreateHostNATRequest) (*pb.CreateHostNATReply, error) {
+	creds, err := credsFromConfig(req.GetInterfaceConfig())
+	if err != nil {
+		return nil, err
+	}
+	protocol := strings.ToLower(strings.TrimSpace(req.GetProtocol()))
+	if protocol != "tcp" && protocol != "udp" {
+		return &pb.CreateHostNATReply{Error: "协议仅支持 tcp/udp"}, nil
+	}
+	hostPort, guestPort := int(req.GetHostPort()), int(req.GetGuestPort())
+	if guestPort < 1 || guestPort > 65535 {
+		return &pb.CreateHostNATReply{Error: "实例端口必须在 1-65535 之间"}, nil
+	}
+	if hostPort < 0 || hostPort > 65535 {
+		return &pb.CreateHostNATReply{Error: "宿主端口必须在 0-65535 之间（0 表示自动分配）"}, nil
+	}
+	// 上游 CreateNATMappingRequest：host_port 0=自动分配，成功直接返回映射对象。
+	var mapping v1NATMap
+	body := map[string]any{
+		"protocol":   protocol,
+		"host_port":  hostPort,
+		"guest_port": guestPort,
+		"remark":     req.GetRemark(),
+	}
+	if err := p.apiPost(ctx, creds, "/instances/"+req.GetHostId()+"/nat", body, &mapping); err != nil {
+		return &pb.CreateHostNATReply{Error: err.Error()}, nil
+	}
+	if mapping.ID == 0 {
+		return &pb.CreateHostNATReply{Error: "上游未返回映射 ID"}, nil
+	}
+	return &pb.CreateHostNATReply{Mapping: natMappingToPB(mapping)}, nil
+}
+
+// DeleteHostNATMapping 删除实例的一条 NAT 端口转发，mapping_id 为列表返回
+// 的 ID；上游删除成功返回 204。
+func (p *virtualisPlugin) DeleteHostNATMapping(ctx context.Context, req *pb.DeleteHostNATRequest) (*pb.DeleteHostNATReply, error) {
+	creds, err := credsFromConfig(req.GetInterfaceConfig())
+	if err != nil {
+		return nil, err
+	}
+	if req.GetMappingId() == 0 {
+		return &pb.DeleteHostNATReply{Error: "映射 ID 无效"}, nil
+	}
+	path := "/instances/" + req.GetHostId() + "/nat/" + strconv.FormatUint(req.GetMappingId(), 10)
+	if err := p.apiDo(ctx, http.MethodDelete, creds, path, nil, nil); err != nil {
+		return &pb.DeleteHostNATReply{Error: err.Error()}, nil
+	}
+	return &pb.DeleteHostNATReply{}, nil
 }
 
 func (p *virtualisPlugin) ListHostOS(ctx context.Context, req *pb.ListHostOSRequest) (*pb.ListHostOSReply, error) {
