@@ -327,7 +327,12 @@ type v1Instance struct {
 }
 
 type v1Agent struct {
-	IP string `json:"ip"`
+	ID          uint     `json:"id"`
+	Name        string   `json:"name"`
+	DisplayName string   `json:"display_name"`
+	Status      string   `json:"status"`
+	IP          string   `json:"ip"`
+	Drivers     []string `json:"drivers"`
 }
 
 // v1NATMap 对应上游 model.NATMapping 的 JSON 形态。id/remark 供 NAT 映射
@@ -497,6 +502,11 @@ func (p *virtualisPlugin) CreateOrder(ctx context.Context, req *pb.CreateOrderRe
 	}
 	if driver == "qemu" {
 		body["type"] = "vm"
+	}
+	// agent_id 非零时把实例固定到指定被控节点（商品配置或用户购买时选择）；
+	// 缺省由上游自动选节点。
+	if agentID := uint(optionInt(options, "agent_id", 0)); agentID > 0 {
+		body["agent_id"] = agentID
 	}
 	// 数量由主程序按单逐台调用（Quantity 恒为 1），此处无需展开。
 
@@ -921,6 +931,32 @@ func (p *virtualisPlugin) ListProductOS(ctx context.Context, req *pb.ListProduct
 		driver = "incus"
 	}
 	return p.listOS(ctx, creds, driver)
+}
+
+// ListAgents 返回上游可用的被控节点列表，供购买页/商品配置选择部署位置。
+// 只透传安全字段；上游不可达或未接入节点时返回空列表（主程序据此隐藏选择）。
+func (p *virtualisPlugin) ListAgents(ctx context.Context, req *pb.ListAgentsRequest) (*pb.ListAgentsReply, error) {
+	creds, err := credsFromConfig(req.GetInterfaceConfig())
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Items []v1Agent `json:"items"`
+	}
+	if err := p.apiGet(ctx, creds, "/agents", &out); err != nil {
+		return &pb.ListAgentsReply{Error: err.Error()}, nil
+	}
+	agents := make([]*pb.UpstreamAgent, 0, len(out.Items))
+	for _, item := range out.Items {
+		agents = append(agents, &pb.UpstreamAgent{
+			Id:          strconv.FormatUint(uint64(item.ID), 10),
+			Name:        item.Name,
+			DisplayName: item.DisplayName,
+			Status:      item.Status,
+			Drivers:     item.Drivers,
+		})
+	}
+	return &pb.ListAgentsReply{Agents: agents}, nil
 }
 
 // listOS 拉取指定驱动的可用镜像列表。
