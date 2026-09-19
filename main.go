@@ -5,7 +5,7 @@
 // 「接口管理」可以为同一个模块配置多个接口（不同的 Virtualis 站点地址
 // 与站点 API Key），配置经每个 RPC 的 interface_config 按请求透传：
 //
-//	api_url  上游 Virtualis 主控地址，如 http://114.66.41.15:8090
+//	api_url  上游 Virtualis 主控地址，如 http://virtualis.example.com:8090
 //	api_key  Virtualis 后台生成的站点 API 密钥（X-Virtualis-Api-Key）
 //
 // 依赖上游 /api/v1 机器 API（API Key 鉴权）：
@@ -136,7 +136,7 @@ func (p *virtualisPlugin) Describe(context.Context, *pb.DescribeRequest) (*pb.Ma
 				Label:    "Virtualis 地址",
 				Type:     pb.FieldType_FIELD_TYPE_TEXT,
 				Required: true,
-				Hint:     "上游 Virtualis 主控的完整地址，如 http://114.66.41.15:8090",
+				Hint:     "上游 Virtualis 主控的完整地址，如 http://virtualis.example.com:8090",
 			},
 			{
 				Key:      "api_key",
