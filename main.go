@@ -503,6 +503,10 @@ func (p *virtualisPlugin) CreateOrder(ctx context.Context, req *pb.CreateOrderRe
 	if driver == "qemu" {
 		body["type"] = "vm"
 	}
+	// NAT 端口转发条数上限（商品配置，0=不限不下传）：上游创建 NAT 映射时强制执行。
+	if maxNAT := optionInt(options, "max_nat_mappings", 0); maxNAT > 0 {
+		body["max_nat_mappings"] = maxNAT
+	}
 	// agent_id 非零时把实例固定到指定被控节点（商品配置或用户购买时选择）；
 	// 缺省由上游自动选节点。
 	if agentID := uint(optionInt(options, "agent_id", 0)); agentID > 0 {
