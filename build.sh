@@ -24,6 +24,17 @@ if [ ! -d "../levis" ]; then
   exit 1
 fi
 
+# Python's standard ZIP writer works in Git Bash too and explicitly records
+# executable permissions required by the Levis installer on Linux/macOS.
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+  PYTHON=python
+else
+  printf 'ERROR: Python 3.8+ is required for release packaging.\n' >&2
+  exit 1
+fi
+
 rm -rf dist
 mkdir -p dist
 
@@ -41,11 +52,10 @@ for platform in "${PLATFORMS[@]}"; do
   cp frontend/index.html "$stage/frontend/index.html"
 
   zip="dist/${ID}-${os}-${arch}.zip"
-  (cd "dist/.build" && zip -qr "../$(basename "$zip")" "$ID")
+  "$PYTHON" scripts/package.py "$stage" "$zip"
   rm -rf "$stage" "dist/.build/plugin"
   echo "  -> $zip"
 done
 
 rm -rf dist/.build
-ls -lh dist/
-echo "完成。"
+printf '完成：dist/virtualis-<os>-<arch>.zip\n'

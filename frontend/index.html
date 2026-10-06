@@ -1,57 +1,194 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Virtualis 对接</title>
-    <style>
-      :root { color-scheme: light dark; }
-      body {
-        margin: 0;
-        padding: 24px;
-        font: 14px/1.8 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-      }
-      h1 { font-size: 18px; margin: 0 0 12px; }
-      code {
-        background: rgba(127, 127, 127, 0.15);
-        border-radius: 4px;
-        padding: 1px 6px;
-        font-size: 12px;
-      }
-      ol { padding-left: 20px; }
-      li { margin: 6px 0; }
-      .card {
-        max-width: 720px;
-        border: 1px solid rgba(127, 127, 127, 0.3);
-        border-radius: 10px;
-        padding: 16px 20px;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>Virtualis 对接插件</h1>
-      <p>让本站商品可以直接在上游 Virtualis 弹性云主机系统上开通（容器 / 虚拟机）。</p>
-      <ol>
-        <li>
-          在 <strong>接口管理</strong> 新增接口：模块选择「Virtualis 对接」，
-          填写上游 <code>Virtualis 地址</code> 与 <code>API 密钥</code>，并点击测试确认连通。
-        </li>
-        <li>
-          在 <strong>商品管理</strong> 新建商品：接口选择刚添加的接口，
-          驱动选 <code>Incus</code>（容器）或 <code>QEMU</code>（虚拟机），
-          配置类型选「弹性云」（设定各项规格的最小/最大值，用户购买时自选）
-          或「管理员固定配置」。
-        </li>
-        <li>
-          用户购买时选择规格与系统镜像（Incus 只能装 Incus 镜像，QEMU 只能装 QEMU 镜像），
-          支付后自动在上游开通实例；已购服务支持开机 / 关机 / 重启。
-        </li>
-      </ol>
-      <p>
-        上游需开放 <code>/api/v1</code> 机器 API（API Key 鉴权），
-        密钥在 Virtualis 后台「安全 → API 密钥」生成。
-      </p>
-    </div>
-  </body>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Virtualis · 开通配置</title>
+  <style>
+    :root { color-scheme:light dark; --bg:#fafafa; --panel:#fff; --text:#171717; --muted:#666; --line:rgba(0,0,0,.12); --accent:#0068d6; --soft:#ebf5ff; }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:32px; background:var(--bg); color:var(--text); font:14px/1.7 system-ui,-apple-system,"Microsoft YaHei",sans-serif; }
+    main { max-width:1100px; margin:auto; }
+    header { margin-bottom:32px; }
+    h1 { font-size:28px; line-height:1.2; letter-spacing:-.8px; font-weight:600; margin:12px 0; }
+    h2 { font-size:18px; font-weight:600; margin:0 0 16px; }
+    p { margin:8px 0; }
+    .muted, small { color:var(--muted); }
+    .badge { display:inline-block; padding:2px 10px; border-radius:99px; color:var(--accent); background:var(--soft); font-size:12px; }
+    .layout { display:grid; grid-template-columns:minmax(0,1.5fr) minmax(260px,1fr); gap:24px; align-items:start; }
+    .card { background:var(--panel); padding:24px; border-radius:8px; box-shadow:0 0 0 1px var(--line),0 2px 2px rgba(0,0,0,.04); animation:enter .2s ease-out; }
+    .grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    label { display:block; font-weight:500; margin-bottom:6px; }
+    label small { display:block; font-weight:400; font-size:12px; }
+    input, select, textarea, button { font:inherit; }
+    input, select, textarea { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); }
+    input, select { min-height:40px; }
+    textarea { min-height:280px; resize:vertical; font:12px/1.8 ui-monospace,Consolas,monospace; }
+    fieldset { padding:0; margin:24px 0 0; border:0; }
+    legend { padding:0; font-size:16px; font-weight:600; margin-bottom:12px; }
+    code { font:12px ui-monospace,Consolas,monospace; background:var(--bg); border-radius:4px; padding:2px 4px; overflow-wrap:anywhere; }
+    .actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:20px; }
+    button { border:1px solid var(--line); background:var(--panel); color:var(--text); border-radius:6px; padding:8px 16px; cursor:pointer; min-height:40px; transition:background .15s,transform .15s; }
+    button.primary { background:var(--text); color:var(--panel); }
+    button:hover { transform:translateY(-1px); }
+    button:disabled { opacity:.5; cursor:not-allowed; transform:none; }
+    :focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+    .notice { padding:12px 16px; border-left:3px solid var(--accent); background:var(--soft); border-radius:4px; margin:16px 0; }
+    #status { min-height:24px; color:var(--accent); overflow-wrap:anywhere; }
+    #status[data-error="true"] { color:#b42318; }
+    ol, ul { padding-left:20px; }
+    li { margin:8px 0; }
+    details { margin-top:20px; border-top:1px solid var(--line); padding-top:16px; }
+    summary { cursor:pointer; font-weight:500; }
+    @keyframes enter { from { opacity:0; transform:translateY(4px); } to { opacity:1; transform:translateY(0); } }
+    @media (prefers-color-scheme:dark) { :root { --bg:#111; --panel:#171717; --text:#ededed; --muted:#aaa; --line:rgba(255,255,255,.16); --accent:#79b8ff; --soft:#142336; } #status[data-error="true"] { color:#fda29b; } }
+    @media (max-width:800px) { body { padding:20px; } .layout { grid-template-columns:1fr; } }
+    @media (max-width:450px) { .grid { grid-template-columns:1fr; } .card { padding:20px; } }
+    @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; } button:hover { transform:none; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <span class="badge">管理员工具 · 离线生成</span>
+    <h1>Virtualis 开通配置</h1>
+    <p class="muted">容器与虚拟机的规格、VPC 和独立 IP 池选项。凭据仅在 Levis「接口管理」配置，按每次 RPC 透传。</p>
+  </header>
+  <div class="layout">
+    <section class="card" aria-labelledby="builder-title">
+      <h2 id="builder-title">生成商品开通选项</h2>
+      <p class="muted">此页不会开通实例或保存商品，只生成 <code>CreateOrder.options</code> 字符串映射。不读取密钥，不连接上游，不持久化草稿。</p>
+      <form id="config-form">
+        <fieldset>
+          <legend>规格与部署位置</legend>
+          <div class="grid">
+            <div><label for="driver">驱动</label><select id="driver" name="driver"><option value="incus">Incus · 容器</option><option value="qemu">QEMU · 虚拟机</option></select></div>
+            <div><label for="agent">节点 ID <small>留空自动选择；VPC / IP 池必须固定节点</small></label><input id="agent" name="agent_id" inputmode="numeric" placeholder="例如 3" autocomplete="off" /></div>
+            <div><label for="cpu">CPU / 核</label><input id="cpu" name="cpu" type="number" min="0.1" max="64" step="0.001" value="1" required /></div>
+            <div><label for="memory">内存 / MB</label><input id="memory" name="memory_mb" type="number" min="1" max="262144" value="512" required /></div>
+            <div><label for="disk">磁盘 / GB</label><input id="disk" name="disk_gb" type="number" min="1" max="4096" value="10" required /></div>
+            <div><label for="image">镜像 ID <small>留空从当前驱动选择可用镜像</small></label><input id="image" name="image_id" inputmode="numeric" autocomplete="off" /></div>
+            <div><label for="bandwidth">带宽 / Mbps <small>0 表示不限</small></label><input id="bandwidth" name="bandwidth_mbps" type="number" min="0" max="100000" value="0" required /></div>
+            <div><label for="traffic">流量配额 / GB <small>0 表示不限；售后流量包仍按 Levis 账务处理</small></label><input id="traffic" name="traffic_gb" type="number" min="0" max="102400" value="0" required /></div>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>网络与地址池</legend>
+          <div class="grid">
+            <div><label for="network-mode">网络模式</label><select id="network-mode" name="network_mode"><option value="nat">NAT · 共享公网</option><option value="dedicated">Dedicated · 独立地址</option><option value="vpc">VPC · 托管私网</option><option value="none">None · 无网络</option></select></div>
+            <div><label for="nat-limit">NAT 映射上限 <small>0 表示不限；需在 Levis 商品中设定</small></label><input id="nat-limit" name="max_nat_mappings" type="number" min="0" max="10000" value="0" /></div>
+            <div><label for="vpc">VPC ID <small><code>vpc_id</code> · 与 IP 池互斥</small></label><input id="vpc" name="vpc_id" inputmode="numeric" autocomplete="off" /></div>
+            <div><label for="pool">IP 池条目 ID <small><code>ip_pool_entry_id</code> · 必须处于 free</small></label><input id="pool" name="ip_pool_entry_id" inputmode="numeric" autocomplete="off" /></div>
+            <div><label for="bridge">接口 / 桥名 <small>VPC 通常留空，由上游继承网络名</small></label><input id="bridge" name="network_bridge" maxlength="64" placeholder="例如 br0" autocomplete="off" /></div>
+            <div><label for="mac">MAC 地址 <small>通常留空，自动生成</small></label><input id="mac" name="network_mac" maxlength="17" placeholder="02:00:00:00:00:07" autocomplete="off" /></div>
+            <div><label for="ipv4">IPv4 / CIDR <small>选择 IP 池时留空，自动生成地址与前缀</small></label><input id="ipv4" name="network_ipv4" placeholder="例如 203.0.113.7/24" autocomplete="off" /></div>
+            <div><label for="gateway">IPv4 网关 <small>留空继承 VPC / 地址池默认值</small></label><input id="gateway" name="network_gateway" placeholder="例如 203.0.113.1" autocomplete="off" /></div>
+          </div>
+          <div style="margin-top:16px"><label for="dns">DNS <small>逗号分隔，最多 4 个 IPv4 / IPv6 地址；留空继承上游默认值</small></label><input id="dns" name="network_dns" placeholder="1.1.1.1, 2606:4700:4700::1111" autocomplete="off" /></div>
+          <p class="notice">固定 IP 条目只能分配一次，不能作为无限库存商品的共享模板。请为每次订单选择空闲条目；禁止买家覆盖管理员指定的节点、网络与地址归属。</p>
+        </fieldset>
+        <div class="actions"><button type="submit" class="primary">校验并生成</button><button type="reset">重置</button></div>
+      </form>
+    </section>
+    <aside class="card" aria-labelledby="result-title">
+      <h2 id="result-title">开通选项 JSON</h2>
+      <label for="config-output" class="muted">供管理员检查 / SDK 对接使用</label>
+      <textarea id="config-output" readonly spellcheck="false" aria-describedby="status"></textarea>
+      <div class="actions"><button id="copy-button" type="button" disabled>复制 JSON</button></div>
+      <p id="status" role="status" aria-live="polite">填写后点击「校验并生成」。</p>
+      <details open>
+        <summary>配置与安全说明</summary>
+        <ol>
+          <li>Levis「接口管理」新增 Virtualis 接口，填写主控 HTTP(S) 地址与 API 密钥。生产环境使用 HTTPS，密钥具备所需 <code>images:read</code>、<code>instances:read</code> / <code>instances:write</code> 权限。</li>
+          <li>在 Virtualis「VPC 与 IP 池」取得同一节点的 VPC ID 或空闲 IP 条目 ID。节点驱动与商品驱动必须一致。</li>
+          <li>生成的是插件 RPC 开通选项，<strong>不是</strong> Levis <code>provision_config</code> 规格区间。商品编辑器未提供网络字段时，需由宿主管理员选项透传逻辑接入；把此 JSON 粘到商品描述不会生效。</li>
+          <li>选 IP 池应留空手工 IPv4；显式地址、网关、DNS / 接口优先于上游默认值。VPC 使用 <code>network_mode=vpc</code> 与对应 <code>vpc_id</code>。</li>
+        </ol>
+      </details>
+      <details>
+        <summary>恢复、改配与终止语义</summary>
+        <ul>
+          <li>快照 / 备份支持列表、创建、恢复与删除。备份经认证流式下载，每块 64 KiB、上限 64 GiB；不会返回含密钥的下载链接。</li>
+          <li>改配使用 typed resources，保留原网络和架构；需关机，不支持磁盘缩小。已应用的相同规格重试不会再次改配。</li>
+          <li>终止服务永久清理上游实例（<code>/purge</code>），不同于回收站软删除。迁移、批量、回收站和全局网络写操作必须由 Levis 管理员入口授权。</li>
+          <li>用户服务功能界面由 Levis 提供。本页不直接执行恢复或迁移；真实 Incus / libvirt 行为需部署环境联调。</li>
+        </ul>
+      </details>
+    </aside>
+  </div>
+</main>
+<script id="config-script">
+'use strict';
+function buildProductOptions(input) {
+  const keys = ['driver','agent_id','cpu','memory_mb','disk_gb','image_id','bandwidth_mbps','traffic_gb','network_mode','max_nat_mappings','vpc_id','ip_pool_entry_id','network_bridge','network_mac','network_ipv4','network_gateway','network_dns'];
+  for (const key of Object.keys(input)) if (!keys.includes(key)) throw new Error('不支持的配置字段：' + key);
+  const options = {};
+  for (const key of keys) if (input[key] !== undefined && input[key] !== '') {
+    if (typeof input[key] !== 'string' || /[\x00-\x1f\x7f]/.test(input[key])) throw new Error('字段格式无效：' + key);
+    options[key] = input[key];
+  }
+  if (!['incus','qemu'].includes(options.driver)) throw new Error('驱动仅支持 incus / qemu');
+  const idKeys = ['agent_id','image_id','vpc_id','ip_pool_entry_id'];
+  for (const key of idKeys) if (options[key] !== undefined && (!/^[1-9][0-9]*$/.test(options[key]) || BigInt(options[key]) > 18446744073709551615n)) throw new Error(key + ' 必须是规范的正整数 ID');
+  const cpu = Number(options.cpu);
+  if (!/^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,3})?$/.test(options.cpu || '') || !Number.isFinite(cpu) || cpu < .1 || cpu > 64) throw new Error('CPU 为 0.1–64 核，最多三位小数');
+  for (const [key,min,max] of [['memory_mb',1,262144],['disk_gb',1,4096],['bandwidth_mbps',0,100000],['traffic_gb',0,102400],['max_nat_mappings',0,10000]]) {
+    const value = options[key] === undefined && key === 'max_nat_mappings' ? '0' : options[key];
+    if (!/^(?:0|[1-9][0-9]*)$/.test(value || '') || Number(value) < min || Number(value) > max) throw new Error(key + ' 必须在 ' + min + '–' + max + ' 之间');
+  }
+  const mode = options.network_mode;
+  if (!['nat','dedicated','vpc','none'].includes(mode)) throw new Error('网络模式无效');
+  if (options.vpc_id && options.ip_pool_entry_id) throw new Error('VPC 与独立 IP 池不能同时选择');
+  if ((options.vpc_id || options.ip_pool_entry_id) && !options.agent_id) throw new Error('VPC / IP 池必须指定所属节点');
+  if ((mode === 'vpc') !== Boolean(options.vpc_id) || (options.ip_pool_entry_id && mode !== 'dedicated')) throw new Error('网络模式与 VPC / IP 池不一致');
+  if (options.network_bridge && (!/^[a-zA-Z0-9_.-]{1,64}$/.test(options.network_bridge) || ['.','..'].includes(options.network_bridge))) throw new Error('接口名无效');
+  if (options.network_mac && !/^(?:[a-fA-F0-9]{2}:){5}[a-fA-F0-9]{2}$/.test(options.network_mac)) throw new Error('MAC 地址需为六组十六进制');
+  const ipv4 = value => value.split('.').length === 4 && value.split('.').every(part => /^(?:0|[1-9][0-9]{0,2})$/.test(part) && Number(part) <= 255);
+  if (options.network_ipv4) {
+    const parts = options.network_ipv4.split('/');
+    if (parts.length > 2 || !ipv4(parts[0]) || (parts.length === 2 && (!/^(?:0|[1-9][0-9]?)$/.test(parts[1]) || Number(parts[1]) > 32))) throw new Error('IPv4 / CIDR 无效');
+  }
+  if (options.network_gateway && !ipv4(options.network_gateway)) throw new Error('网关必须是 IPv4 地址');
+  if (options.network_dns) {
+    const dns = options.network_dns.split(',').map(value => value.trim());
+    const ip = value => {
+      if (ipv4(value)) return true;
+      if (!/^[0-9a-fA-F:]+$/.test(value) || !value.includes(':')) return false;
+      try { return Boolean(new URL('http://[' + value + ']/').hostname); } catch { return false; }
+    };
+    if (dns.length > 4 || dns.some(value => !ip(value))) throw new Error('最多配置 4 个有效 DNS 地址');
+  }
+  if (mode === 'none' && ['network_bridge','network_mac','network_ipv4','network_gateway','network_dns'].some(key => options[key])) throw new Error('无网络模式不应携带网卡配置');
+  return options;
+}
+if (typeof document !== 'undefined') {
+  const form = document.getElementById('config-form');
+  const output = document.getElementById('config-output');
+  const copy = document.getElementById('copy-button');
+  const status = document.getElementById('status');
+  const clear = () => { output.value = ''; copy.disabled = true; status.textContent = '配置已变动，请重新校验生成。'; status.dataset.error = 'false'; };
+  form.addEventListener('input', clear);
+  form.addEventListener('change', clear);
+  form.addEventListener('reset', clear);
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    try {
+      const options = buildProductOptions(Object.fromEntries(new FormData(form)));
+      output.value = JSON.stringify(options, null, 2);
+      copy.disabled = false;
+      status.dataset.error = 'false';
+      status.textContent = '已校验生成；尚未保存到商品或发送到上游。';
+    } catch (error) {
+      output.value = ''; copy.disabled = true;
+      status.dataset.error = 'true'; status.textContent = error.message;
+    }
+  });
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(output.value); status.textContent = '已复制开通选项。'; }
+    catch { output.focus(); output.select(); status.textContent = '浏览器未授权剪贴板，请按 Ctrl/Cmd+C 手动复制。'; }
+  });
+}
+</script>
+</body>
 </html>
