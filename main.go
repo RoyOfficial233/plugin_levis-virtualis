@@ -36,7 +36,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -75,7 +74,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	server := grpc.NewServer(grpc.UnaryInterceptor(authInterceptor(token)))
+	server := grpc.NewServer(
+		grpc.UnaryInterceptor(authInterceptor(token)),
+		grpc.StreamInterceptor(authStreamInterceptor(token)),
+	)
 	srv := &virtualisPlugin{server: server, client: &http.Client{Timeout: 60 * time.Second}}
 	pb.RegisterPluginServer(server, srv)
 
@@ -88,23 +90,33 @@ func main() {
 	}
 }
 
+func authenticateRPC(ctx context.Context, token string) error {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return status.Error(codes.Unauthenticated, "缺少令牌")
+	}
+	values := md.Get(plugin.MetadataToken)
+	if len(values) != 1 || token == "" || subtle.ConstantTimeCompare([]byte(values[0]), []byte(token)) != 1 {
+		return status.Error(codes.Unauthenticated, "令牌不匹配")
+	}
+	return nil
+}
+
 func authInterceptor(token string) grpc.UnaryServerInterceptor {
-	return func(
-		ctx context.Context, req any,
-		info *grpc.UnaryServerInfo, handler grpc.UnaryHandler,
-	) (any, error) {
-		md, ok := metadata.FromIncomingContext(ctx)
-		if !ok {
-			return nil, status.Error(codes.Unauthenticated, "缺少令牌")
-		}
-		values := md.Get(plugin.MetadataToken)
-		if len(values) == 0 {
-			return nil, status.Error(codes.Unauthenticated, "缺少令牌")
-		}
-		if subtle.ConstantTimeCompare([]byte(values[0]), []byte(token)) != 1 {
-			return nil, status.Error(codes.Unauthenticated, "令牌不匹配")
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		if err := authenticateRPC(ctx, token); err != nil {
+			return nil, err
 		}
 		return handler(ctx, req)
+	}
+}
+
+func authStreamInterceptor(token string) grpc.StreamServerInterceptor {
+	return func(srv any, stream grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		if err := authenticateRPC(stream.Context(), token); err != nil {
+			return err
+		}
+		return handler(srv, stream)
 	}
 }
 
@@ -182,12 +194,19 @@ type credentials struct {
 // credsFromConfig 从接口配置里取出上游地址与密钥。
 func credsFromConfig(config map[string]string) (*credentials, error) {
 	apiURL := strings.TrimRight(strings.TrimSpace(config["api_url"]), "/")
-	apiKey := strings.TrimSpace(config["api_key"])
+	apiKey := config["api_key"]
 	if apiURL == "" {
 		return nil, status.Error(codes.FailedPrecondition, "接口未配置 Virtualis 地址（api_url）")
 	}
 	if apiKey == "" {
 		return nil, status.Error(codes.FailedPrecondition, "接口未配置 API 密钥（api_key）")
+	}
+	base, err := url.Parse(apiURL)
+	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Hostname() == "" || base.User != nil || base.RawQuery != "" || base.ForceQuery || base.Fragment != "" || !safeBasePath(base) {
+		return nil, status.Error(codes.FailedPrecondition, "Virtualis 地址必须是无认证信息、查询或路径穿越的 HTTP(S) 地址")
+	}
+	if apiKey != strings.TrimSpace(apiKey) || len(apiKey) > 4096 || strings.IndexFunc(apiKey, func(r rune) bool { return r < 33 || r > 126 }) >= 0 {
+		return nil, status.Error(codes.FailedPrecondition, "API 密钥格式无效")
 	}
 	return &credentials{apiURL: apiURL, apiKey: apiKey}, nil
 }
@@ -203,6 +222,15 @@ func (p *virtualisPlugin) apiPost(ctx context.Context, creds *credentials, path 
 }
 
 func (p *virtualisPlugin) apiDo(ctx context.Context, method string, creds *credentials, path string, body any, out any) error {
+	return p.apiDoTimeout(ctx, method, creds, path, body, out, requestTimeout)
+}
+
+func (p *virtualisPlugin) apiDoTimeout(ctx context.Context, method string, creds *credentials, path string, body any, out any, timeout time.Duration) error {
+	if !safeAPIPath(path) {
+		return status.Error(codes.InvalidArgument, "上游路径或 ID 无效")
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
@@ -216,43 +244,40 @@ func (p *virtualisPlugin) apiDo(ctx context.Context, method string, creds *crede
 		return err
 	}
 	req.Header.Set("X-Virtualis-Api-Key", creds.apiKey)
+	if id, _ := ctx.Value(operationIDKey{}).(string); id != "" {
+		req.Header.Set("X-Levis-Operation-ID", id)
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	p.mu.Lock()
-	client := p.client
-	p.mu.Unlock()
-	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-	}
+	client := p.requestClient(timeout)
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("上游请求失败: %w", err)
+		if ctx.Err() != nil {
+			return status.FromContextError(ctx.Err()).Err()
+		}
+		return fmt.Errorf("上游请求失败（连接、TLS 或地址不可用）")
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxJSONResponse+1))
 	if err != nil {
 		return fmt.Errorf("读取上游响应失败: %w", err)
+	}
+	if len(raw) > maxJSONResponse {
+		return fmt.Errorf("上游 JSON 响应超过大小限制")
 	}
 
 	// Virtualis 是 REST 风格：所有 2xx 都表示成功，失败 4xx/5xx 给
 	// {code, message}。204 等无正文响应直接成功。
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		var errBody struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		}
-		if json.Unmarshal(raw, &errBody) == nil && errBody.Message != "" {
-			return fmt.Errorf("上游返回错误: %s", errBody.Message)
-		}
-		return fmt.Errorf("上游返回 HTTP %d: %s", resp.StatusCode, truncate(string(raw), 200))
+		return parseUpstreamError(resp, raw, creds)
 	}
 	// 204 或 "null"（成功但无数据）都跳过解析。
 	if out != nil && len(raw) > 0 && string(raw) != "null" {
 		if err := json.Unmarshal(raw, out); err != nil {
-			return fmt.Errorf("解析上游数据失败: %w，内容: %s", err, truncate(string(raw), 200))
+			return fmt.Errorf("解析上游 JSON 数据失败: %w", err)
 		}
 	}
 	return nil
@@ -294,7 +319,8 @@ type v1Network struct {
 	IPv4          string   `json:"ipv4,omitempty"`
 	Gateway       string   `json:"gateway,omitempty"`
 	DNS           []string `json:"dns,omitempty"`
-	BandwidthMbps int      `json:"bandwidth_mbps,omitempty"`
+	BandwidthMbps int      `json:"bandwidth_mbps"`
+	TrafficGB     int      `json:"traffic_gb"`
 }
 
 type v1NetworkStatus struct {
@@ -372,33 +398,6 @@ func (p *virtualisPlugin) GetProduct(context.Context, *pb.GetProductRequest) (*p
 // 下单开通
 // =============================================================================
 
-// option 把 options 里的字符串解析成非负整数，缺省回退 def。
-func optionInt(options map[string]string, key string, def int) int {
-	raw := strings.TrimSpace(options[key])
-	if raw == "" {
-		return def
-	}
-	value, err := strconv.Atoi(raw)
-	if err != nil || value < 0 {
-		return def
-	}
-	return value
-}
-
-// optionCPUMilli 把 options 里的 CPU 选项解析成毫核（0.5 核 = 500）。
-// 允许小数核；缺失/非法回退到默认 1 整核。
-func optionCPUMilli(options map[string]string, key string) int {
-	raw := strings.TrimSpace(options[key])
-	if raw == "" {
-		return 1000
-	}
-	value, err := strconv.ParseFloat(raw, 64)
-	if err != nil || value <= 0 {
-		return 1000
-	}
-	return int(math.Round(value * 1000))
-}
-
 // cpuLabel 供展示：毫核实例显示 0.5 核 这类小数，其余显示整核。
 func cpuLabel(milli, cores int) string {
 	if milli > 0 && milli%1000 != 0 {
@@ -460,59 +459,17 @@ func (p *virtualisPlugin) CreateOrder(ctx context.Context, req *pb.CreateOrderRe
 	if err != nil {
 		return nil, err
 	}
-	options := req.GetOptions()
-
-	driver := strings.ToLower(strings.TrimSpace(options["driver"]))
-	if driver != "qemu" {
-		driver = "incus"
+	body, driver, err := createPayload(req.GetOptions(), req.GetRemark())
+	if err != nil {
+		return &pb.CreateOrderReply{Error: err.Error()}, nil
 	}
-
-	cpuMilli := optionCPUMilli(options, "cpu")
-	cpu := (cpuMilli + 999) / 1000
-	memoryMB := optionInt(options, "memory_mb", 512)
-	diskGB := optionInt(options, "disk_gb", 10)
-	if cpuMilli < 100 {
-		return &pb.CreateOrderReply{Error: "CPU 核数必须大于零"}, nil
-	}
-	if memoryMB < 16 {
-		return &pb.CreateOrderReply{Error: "内存必须大于零"}, nil
-	}
-	if diskGB < 1 {
-		return &pb.CreateOrderReply{Error: "硬盘容量必须大于零"}, nil
-	}
-
-	imageID := uint(optionInt(options, "image_id", 0))
-	if imageID == 0 {
-		// 管理员代开等场景没有用户选配：按驱动自选一个可用镜像。
+	if _, chosen := body["image_id"]; !chosen {
 		id, _, err := p.pickImage(ctx, creds, driver)
 		if err != nil {
 			return &pb.CreateOrderReply{Error: err.Error()}, nil
 		}
-		imageID = id
+		body["image_id"] = id
 	}
-
-	// QEMU 镜像/实例类型为 vm，Incus 为 container；网络统一 NAT 模式。
-	body := map[string]any{
-		"name":     instanceName(req.GetRemark()),
-		"driver":   driver,
-		"type":     "container",
-		"spec":     v1Spec{CPU: cpu, CPUMilli: cpuMilli, MemoryMB: memoryMB, DiskGB: diskGB},
-		"network":  v1Network{Mode: "nat", BandwidthMbps: optionInt(options, "bandwidth_mbps", 0)},
-		"image_id": imageID,
-	}
-	if driver == "qemu" {
-		body["type"] = "vm"
-	}
-	// NAT 端口转发条数上限（商品配置，0=不限不下传）：上游创建 NAT 映射时强制执行。
-	if maxNAT := optionInt(options, "max_nat_mappings", 0); maxNAT > 0 {
-		body["max_nat_mappings"] = maxNAT
-	}
-	// agent_id 非零时把实例固定到指定被控节点（商品配置或用户购买时选择）；
-	// 缺省由上游自动选节点。
-	if agentID := uint(optionInt(options, "agent_id", 0)); agentID > 0 {
-		body["agent_id"] = agentID
-	}
-	// 数量由主程序按单逐台调用（Quantity 恒为 1），此处无需展开。
 
 	var instance v1Instance
 	if err := p.apiPost(ctx, creds, "/instances", body, &instance); err != nil {
@@ -575,8 +532,13 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 		return nil, err
 	}
 	hostID := req.GetHostId()
+	if !validID(hostID) {
+		return nil, status.Error(codes.InvalidArgument, "实例 ID 无效")
+	}
 
 	switch req.GetAction() {
+	case pb.HostAction_HOST_ACTION_RESIZE:
+		return p.resizeHost(ctx, creds, req)
 	case pb.HostAction_HOST_ACTION_RENEW:
 		// Virtualis 不做上游计费，续费只顺延本地到期时间。
 		return &pb.ManageHostReply{Success: true}, nil
@@ -600,10 +562,10 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 		return p.power(ctx, creds, hostID, "hard_restart")
 
 	case pb.HostAction_HOST_ACTION_TERMINATE:
-		if err := p.apiDo(ctx, http.MethodDelete, creds, "/instances/"+hostID, nil, nil); err != nil {
-			// 删除要幂等：上游已经没有这个实例（重复删除、本地残留补偿）
-			// 视为成功，否则本地会永远删不掉。
-			if !strings.Contains(err.Error(), "not found") {
+		if err := p.apiDoTimeout(ctx, http.MethodDelete, creds, "/instances/"+hostID+"/purge", nil, nil, recoveryTimeout); err != nil {
+			// Only a structured resource-not-found is idempotent; a missing
+			// route on an older master must not silently fall back to soft delete.
+			if !resourceNotFound(err) {
 				return &pb.ManageHostReply{Error: err.Error()}, nil
 			}
 		}
@@ -702,7 +664,7 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 	resources := &pb.HostResources{
 		Cpu: int32(instance.Spec.CPU), CpuMilli: int32(instance.Spec.CPUMilli),
 		MemoryMb: int64(instance.Spec.MemoryMB),
-		DiskGb:   int64(instance.Spec.DiskGB), BandwidthMbps: int64(instance.Network.BandwidthMbps),
+		DiskGb:   int64(instance.Spec.DiskGB), BandwidthMbps: int64(instance.Network.BandwidthMbps), TrafficGb: int64(instance.Network.TrafficGB),
 	}
 	network := &pb.HostNetwork{
 		Mode: instance.Network.Mode, Ipv4: ip, Mac: instance.Network.MAC,

@@ -1,3 +1,6 @@
 dist/
 .DS_Store
 plugin_levis-virtualis
+*.exe
+__pycache__/
+*.pyc
