@@ -15,7 +15,7 @@ import (
 
 func globalOperation(action string) bool {
 	switch action {
-	case "vpc_list", "vpc_create", "vpc_delete", "ip_pool_free", "trash_list", "batch":
+	case "security_groups_list", "vpc_list", "vpc_create", "vpc_delete", "ip_pool_free", "trash_list", "batch":
 		return true
 	}
 	return false
@@ -25,6 +25,26 @@ func planNetworkOperation(host, action string, m map[string]json.RawMessage) (ho
 	plan := hostOperationPlan{timeout: requestTimeout}
 	base := "/instances/" + host
 	switch action {
+	case "security_groups_list", "security_groups_get":
+		if err := allowedKeys(m); err != nil {
+			return plan, err
+		}
+		plan.method, plan.path, plan.result = http.MethodGet, base+"/security-groups", "security_groups_binding"
+		if action == "security_groups_list" {
+			plan.path, plan.result = "/security-groups", "security_groups_list"
+		}
+	case "security_groups_set":
+		if err := allowedKeys(m, "security_group_ids"); err != nil {
+			return plan, err
+		}
+		var ids []uint64
+		if err := payloadValue(m, "security_group_ids", &ids, true); err != nil {
+			return plan, err
+		}
+		if err := validateGroupIDs(ids); err != nil {
+			return plan, err
+		}
+		plan.method, plan.path, plan.body, plan.result = http.MethodPut, base+"/security-groups", map[string]any{"security_group_ids": ids}, "security_groups_binding"
 	case "firewall_list":
 		if err := allowedKeys(m); err != nil {
 			return plan, err

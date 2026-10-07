@@ -159,7 +159,7 @@ func redactSecrets(data []byte, creds *credentials) []byte {
 
 var recoveryFields = []string{"id", "instance_id", "agent_id", "name", "remark", "size_bytes", "status", "created_at", "driver", "checksum"}
 var instanceFields = []string{"id", "agent_id", "vpc_id", "ip_pool_entry_id", "name", "display_name", "driver", "type", "status", "ip", "observed_ip", "trashed_at", "purge_after", "created_at"}
-var networkFields = []string{"mode", "bridge", "mac", "ipv4", "gateway", "dns", "bandwidth_mbps", "traffic_gb"}
+var networkFields = []string{"mode", "dedicated_mode", "bridge", "mac", "ipv4", "gateway", "dns", "bandwidth_mbps", "traffic_gb"}
 
 func sanitizeInstance(m map[string]json.RawMessage) map[string]json.RawMessage {
 	out := pickFields(m, instanceFields...)
@@ -173,6 +173,9 @@ func sanitizeInstance(m map[string]json.RawMessage) map[string]json.RawMessage {
 }
 
 func sanitizeFeatureData(raw json.RawMessage, kind string) ([]byte, error) {
+	if strings.HasPrefix(kind, "security_groups_") {
+		return sanitizeSecurityGroups(raw, kind)
+	}
 	if kind == "empty" {
 		return []byte("{}"), nil
 	}

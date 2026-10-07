@@ -313,6 +313,7 @@ type v1Spec struct {
 }
 
 type v1Network struct {
+	DedicatedMode string   `json:"dedicated_mode,omitempty"`
 	Mode          string   `json:"mode"`
 	Bridge        string   `json:"bridge,omitempty"`
 	MAC           string   `json:"mac,omitempty"`
