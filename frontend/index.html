@@ -58,7 +58,8 @@
   <div class="layout">
     <section class="card" aria-labelledby="builder-title">
       <h2 id="builder-title">生成商品开通选项</h2>
-      <p class="muted">此页不会开通实例或保存商品，只生成 <code>CreateOrder.options</code> 字符串映射。不读取密钥，不连接上游，不持久化草稿。</p>
+      <p class="muted">此页不会开通实例或保存商品。默认生成 Levis <code>provision_config</code> 固定商品预设；管理员也可切换为单次 RPC 选项。不读取密钥，不连接上游，不持久化草稿。</p>
+      <label for="config-kind">生成用途</label><select id="config-kind"><option value="preset">可重复销售的商品预设（自动分配独立 IP）</option><option value="manual">管理员单次开通 RPC 选项（允许固定池条目）</option></select>
       <form id="config-form">
         <fieldset>
           <legend>规格与部署位置</legend>
@@ -77,6 +78,7 @@
           <legend>网络与地址池</legend>
           <div class="grid">
             <div><label for="network-mode">网络模式</label><select id="network-mode" name="network_mode"><option value="nat">NAT · 共享公网</option><option value="dedicated">Dedicated · 独立地址</option><option value="vpc">VPC · 托管私网</option><option value="none">None · 无网络</option></select></div>
+            <div><label for="dedicated-mode">独立地址接入方式 <small>物理上联自动使用路由；现有 Linux 桥自动使用桥接</small></label><select id="dedicated-mode" name="dedicated_mode"><option value="">自动（仅独立地址有效）</option><option value="routed">路由 routed · 物理上联</option><option value="bridge">桥接 bridge · 已有 Linux 桥</option></select></div>
             <div><label for="nat-limit">NAT 映射上限 <small>0 表示不限；需在 Levis 商品中设定</small></label><input id="nat-limit" name="max_nat_mappings" type="number" min="0" max="10000" value="0" /></div>
             <div><label for="vpc">VPC ID <small><code>vpc_id</code> · 与 IP 池互斥</small></label><input id="vpc" name="vpc_id" inputmode="numeric" autocomplete="off" /></div>
             <div><label for="pool">IP 池条目 ID <small><code>ip_pool_entry_id</code> · 必须处于 free</small></label><input id="pool" name="ip_pool_entry_id" inputmode="numeric" autocomplete="off" /></div>
@@ -86,7 +88,8 @@
             <div><label for="gateway">IPv4 网关 <small>留空继承 VPC / 地址池默认值</small></label><input id="gateway" name="network_gateway" placeholder="例如 203.0.113.1" autocomplete="off" /></div>
           </div>
           <div style="margin-top:16px"><label for="dns">DNS <small>逗号分隔，最多 4 个 IPv4 / IPv6 地址；留空继承上游默认值</small></label><input id="dns" name="network_dns" placeholder="1.1.1.1, 2606:4700:4700::1111" autocomplete="off" /></div>
-          <p class="notice">固定 IP 条目只能分配一次，不能作为无限库存商品的共享模板。请为每次订单选择空闲条目；禁止买家覆盖管理员指定的节点、网络与地址归属。</p>
+          <div style="margin-top:16px"><label for="groups">商品固定安全组 ID <small>在 Virtualis 管理端创建并管理规则；填入最多 16 个不重复 ID，英文逗号分隔。默认入站拒绝、出站允许；买家不能解除商品要求的安全组。</small></label><input id="groups" name="security_group_ids" placeholder="例如 3,9" autocomplete="off" /></div>
+          <p class="notice">独立地址商品无需固定池条目或手工 IPv4：上游为每台订单实例原子分配空闲地址，无可用地址时会明确报错。固定池条目、VPC、MAC / 网关仅供管理员单次开通，不得作为重复销售预设。</p>
         </fieldset>
         <div class="actions"><button type="submit" class="primary">校验并生成</button><button type="reset">重置</button></div>
       </form>
@@ -101,8 +104,8 @@
         <summary>配置与安全说明</summary>
         <ol>
           <li>Levis「接口管理」新增 Virtualis 接口，填写主控 HTTP(S) 地址与 API 密钥。生产环境使用 HTTPS，密钥具备所需 <code>images:read</code>、<code>instances:read</code> / <code>instances:write</code> 权限。</li>
-          <li>在 Virtualis「VPC 与 IP 池」取得同一节点的 VPC ID 或空闲 IP 条目 ID。节点驱动与商品驱动必须一致。</li>
-          <li>生成的是插件 RPC 开通选项，<strong>不是</strong> Levis <code>provision_config</code> 规格区间。商品编辑器未提供网络字段时，需由宿主管理员选项透传逻辑接入；把此 JSON 粘到商品描述不会生效。</li>
+          <li>先在 Virtualis 节点配置可用独立 IP 池与上联接口，并配置安全组及规则。节点驱动与商品驱动必须一致。</li>
+          <li>默认输出可直接作为管理员商品 API 的 <code>provision_config</code>，或使用 Levis 商品编辑器保存同名字段。生成 JSON 不等于保存；粘到商品描述不会生效。商品预设的镜像由买家选择，单次 RPC 模式才使用本页镜像 ID。</li>
           <li>选 IP 池应留空手工 IPv4；显式地址、网关、DNS / 接口优先于上游默认值。VPC 使用 <code>network_mode=vpc</code> 与对应 <code>vpc_id</code>。</li>
         </ol>
       </details>
@@ -121,7 +124,7 @@
 <script id="config-script">
 'use strict';
 function buildProductOptions(input) {
-  const keys = ['driver','agent_id','cpu','memory_mb','disk_gb','image_id','bandwidth_mbps','traffic_gb','network_mode','max_nat_mappings','vpc_id','ip_pool_entry_id','network_bridge','network_mac','network_ipv4','network_gateway','network_dns'];
+  const keys = ['driver','agent_id','cpu','memory_mb','disk_gb','image_id','bandwidth_mbps','traffic_gb','network_mode','dedicated_mode','security_group_ids','max_nat_mappings','vpc_id','ip_pool_entry_id','network_bridge','network_mac','network_ipv4','network_gateway','network_dns'];
   for (const key of Object.keys(input)) if (!keys.includes(key)) throw new Error('不支持的配置字段：' + key);
   const options = {};
   for (const key of keys) if (input[key] !== undefined && input[key] !== '') {
@@ -139,6 +142,11 @@ function buildProductOptions(input) {
   }
   const mode = options.network_mode;
   if (!['nat','dedicated','vpc','none'].includes(mode)) throw new Error('网络模式无效');
+  if (options.dedicated_mode && (!['auto','routed','bridge'].includes(options.dedicated_mode) || mode !== 'dedicated')) throw new Error('独立网络模式仅适用于独立地址，支持 auto / routed / bridge');
+  if (options.security_group_ids) {
+    const ids = options.security_group_ids.split(',');
+    if (ids.length > 16 || new Set(ids).size !== ids.length || ids.some(id => !/^[1-9][0-9]*$/.test(id) || BigInt(id) > 18446744073709551615n)) throw new Error('安全组为最多 16 个不重复的规范正整数 ID，以逗号分隔');
+  }
   if (options.vpc_id && options.ip_pool_entry_id) throw new Error('VPC 与独立 IP 池不能同时选择');
   if ((options.vpc_id || options.ip_pool_entry_id) && !options.agent_id) throw new Error('VPC / IP 池必须指定所属节点');
   if ((mode === 'vpc') !== Boolean(options.vpc_id) || (options.ip_pool_entry_id && mode !== 'dedicated')) throw new Error('网络模式与 VPC / IP 池不一致');
@@ -162,19 +170,33 @@ function buildProductOptions(input) {
   if (mode === 'none' && ['network_bridge','network_mac','network_ipv4','network_gateway','network_dns'].some(key => options[key])) throw new Error('无网络模式不应携带网卡配置');
   return options;
 }
+function buildProvisionPreset(input) {
+  const options = buildProductOptions(input);
+  if (!['nat','dedicated'].includes(options.network_mode) || ['vpc_id','ip_pool_entry_id','network_ipv4','network_gateway','network_mac'].some(key => options[key])) throw new Error('一次性池条目、VPC、手工地址及 MAC / 网关不能进入重复销售商品预设');
+  const safeID = value => {
+    if (BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error('商品 ID 超过浏览器安全整数范围，请使用管理员 API');
+    return Number(value);
+  };
+  const preset = {driver:options.driver, mode:'fixed', agent_id:options.agent_id ? safeID(options.agent_id) : 0, allow_buyer_agent:false, max_nat_mappings:Number(options.max_nat_mappings || 0), network_mode:options.network_mode, dedicated_mode:options.network_mode==='dedicated' ? (options.dedicated_mode || 'auto') : '', network_bridge:options.network_bridge || '', network_dns:options.network_dns ? options.network_dns.split(',').map(value=>value.trim()) : [], security_group_ids:options.security_group_ids ? options.security_group_ids.split(',').map(safeID) : []};
+  for (const key of ['cpu','memory_mb','disk_gb','bandwidth_mbps','traffic_gb']) preset[key] = {min:Number(options[key]),max:Number(options[key]),step:0,unit_price_cents:0};
+  return preset;
+}
 if (typeof document !== 'undefined') {
   const form = document.getElementById('config-form');
   const output = document.getElementById('config-output');
   const copy = document.getElementById('copy-button');
   const status = document.getElementById('status');
+  const kind = document.getElementById('config-kind');
   const clear = () => { output.value = ''; copy.disabled = true; status.textContent = '配置已变动，请重新校验生成。'; status.dataset.error = 'false'; };
   form.addEventListener('input', clear);
   form.addEventListener('change', clear);
   form.addEventListener('reset', clear);
+  kind.addEventListener('change', clear);
   form.addEventListener('submit', event => {
     event.preventDefault();
     try {
-      const options = buildProductOptions(Object.fromEntries(new FormData(form)));
+      const input = Object.fromEntries(new FormData(form));
+      const options = kind.value === 'preset' ? buildProvisionPreset(input) : buildProductOptions(input);
       output.value = JSON.stringify(options, null, 2);
       copy.disabled = false;
       status.dataset.error = 'false';
