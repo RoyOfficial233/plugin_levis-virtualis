@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	pb "github.com/SakuraOpenSource/levis/pkg/plugin/proto"
 )
 
 const (
@@ -12,6 +14,19 @@ const (
 	recoveryTimeout = 2 * time.Hour
 	maxJSONResponse = 4 << 20
 )
+
+// manageTimeout picks the upstream HTTP budget for a ManageHost action.
+// Mutations that can replace disks or permanently delete data may legitimately
+// run for hours on a loaded agent; every other action keeps the short budget
+// so a hung request fails fast instead of pinning the host RPC for 2 hours.
+func manageTimeout(action pb.HostAction) time.Duration {
+	switch action {
+	case pb.HostAction_HOST_ACTION_RESIZE, pb.HostAction_HOST_ACTION_TERMINATE, pb.HostAction_HOST_ACTION_REINSTALL:
+		return recoveryTimeout
+	default:
+		return requestTimeout
+	}
+}
 
 func safeBasePath(base *url.URL) bool {
 	if base.RawPath != "" || strings.ContainsAny(base.Path, "\\%") || strings.Contains(base.Path, "//") {

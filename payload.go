@@ -143,18 +143,70 @@ func pickFields(m map[string]json.RawMessage, keys ...string) map[string]json.Ra
 // redactSecrets removes upstream credential material (API key, upstream URL)
 // from every allowed string value; list payloads pass through the same
 // sanitizer, so free-text fields like remark cannot echo secrets back.
+//
+// Replacement happens on decoded string values and the document is re-encoded:
+// replacing the raw secret against already-encoded JSON could miss escaped
+// forms (quotes, backslashes, HTML-escaped & < >), letting the browser decode
+// the credential back after JSON.parse.
 func redactSecrets(data []byte, creds *credentials) []byte {
 	if creds == nil {
 		return data
 	}
-	text := string(data)
+	secrets := make([]string, 0, 2)
 	for _, secret := range []string{creds.apiKey, creds.apiURL} {
-		if secret == "" {
-			continue
+		if secret != "" {
+			secrets = append(secrets, secret)
 		}
-		text = strings.ReplaceAll(text, secret, "[redacted]")
 	}
-	return []byte(text)
+	if len(secrets) == 0 {
+		return data
+	}
+	var doc any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		// Sanitizer output is always valid JSON; if not, redact defensively on
+		// the encoded text so a malformed document cannot leak either.
+		text := string(data)
+		for _, secret := range secrets {
+			text = strings.ReplaceAll(text, secret, "[redacted]")
+		}
+		return []byte(text)
+	}
+	redactValue(doc, secrets)
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return []byte("{}")
+	}
+	return out
+}
+
+// redactValue walks decoded JSON and replaces secret substrings inside every
+// string (objects, arrays and scalars alike).
+func redactValue(v any, secrets []string) {
+	switch value := v.(type) {
+	case map[string]any:
+		for key, item := range value {
+			if s, ok := item.(string); ok {
+				value[key] = redactString(s, secrets)
+			} else {
+				redactValue(item, secrets)
+			}
+		}
+	case []any:
+		for i, item := range value {
+			if s, ok := item.(string); ok {
+				value[i] = redactString(s, secrets)
+			} else {
+				redactValue(item, secrets)
+			}
+		}
+	}
+}
+
+func redactString(s string, secrets []string) string {
+	for _, secret := range secrets {
+		s = strings.ReplaceAll(s, secret, "[redacted]")
+	}
+	return s
 }
 
 var recoveryFields = []string{"id", "instance_id", "agent_id", "name", "remark", "size_bytes", "status", "created_at", "driver", "checksum"}

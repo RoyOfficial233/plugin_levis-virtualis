@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -99,6 +100,89 @@ func TestPluginStreamingRPCRequiresToken(t *testing.T) {
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("unauthorized requests reached upstream: %d", requests.Load())
+	}
+}
+
+// Compatibility with the Levis host's withToken stream: the real main()
+// wiring must accept the session token in the *stream* metadata (exactly what
+// c.withToken(ctx) produces) and deliver the filename on the first chunk so
+// the browser download can be named before any body byte is written.
+func TestPluginStreamWithTokenCarriesFilenameOnFirstChunk(t *testing.T) {
+	archive := bytes.Repeat([]byte("first-chunk-metadata"), 6000) // > 64 KiB, forces multiple chunks
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Virtualis-Api-Key") != "upstream-key" {
+			w.WriteHeader(401)
+			return
+		}
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", `attachment; filename="backup-4.tar.gz"`)
+		w.Write(archive)
+	}))
+	defer srv.Close()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestPluginProcessMain$")
+	cmd.Env = append(os.Environ(), "LEVIS_TEST_PLUGIN_PROCESS=1", plugin.EnvToken+"=stream-token")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Stderr = io.Discard
+	if err = cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	scanner := bufio.NewScanner(stdout)
+	if !scanner.Scan() {
+		t.Fatalf("missing handshake: %v", scanner.Err())
+	}
+	var handshake struct {
+		Port int `json:"port"`
+	}
+	if err := json.Unmarshal(scanner.Bytes(), &handshake); err != nil || handshake.Port == 0 {
+		t.Fatalf("invalid handshake: %s", scanner.Text())
+	}
+	conn, err := grpc.NewClient(fmt.Sprintf("127.0.0.1:%d", handshake.Port), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	client := pb.NewPluginClient(conn)
+	// Same shape as the fixed host: metadata on the stream creation context,
+	// lifetime owned by the caller, no c.call wrapper.
+	streamCtx := metadata.AppendToOutgoingContext(ctx, plugin.MetadataToken, "stream-token")
+	stream, err := client.DownloadHostBackup(streamCtx, &pb.HostBackupRequest{HostId: "7", BackupId: 4, InterfaceConfig: testConfig(srv, "upstream-key")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var received []byte
+	chunkCount := 0
+	for {
+		chunk, err := stream.Recv()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("authenticated stream failed mid-transfer: %v", err)
+		}
+		if chunkCount == 0 && chunk.GetFilename() != "backup-4.tar.gz" {
+			t.Fatalf("first chunk filename = %q, want backup-4.tar.gz", chunk.GetFilename())
+		}
+		if chunkCount > 0 && chunk.GetFilename() != "" {
+			t.Fatalf("non-first chunk repeated filename: %q", chunk.GetFilename())
+		}
+		if len(chunk.GetData()) == 0 || len(chunk.GetData()) > 64<<10 {
+			t.Fatalf("invalid chunk size %d", len(chunk.GetData()))
+		}
+		received = append(received, chunk.GetData()...)
+		chunkCount++
+	}
+	if chunkCount < 2 || !bytes.Equal(received, archive) {
+		t.Fatalf("chunks=%d bytes=%d want=%d", chunkCount, len(received), len(archive))
 	}
 }
 

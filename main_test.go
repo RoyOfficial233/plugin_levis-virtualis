@@ -7,7 +7,9 @@ import (
 )
 
 func TestV1Status(t *testing.T) {
-	cases := map[string]string{"running": "active", "stopped": "suspended", "error": "suspended", "creating": "pending"}
+	// Contract: upstream `stopped` passes through verbatim so the Levis
+	// change flow (only accepts stopped/off) can trigger after shutdown.
+	cases := map[string]string{"running": "active", "stopped": "stopped", "error": "suspended", "creating": "pending"}
 	for input, want := range cases {
 		if got := v1Status(input); got != want {
 			t.Fatalf("v1Status(%q) = %q, want %q", input, got, want)

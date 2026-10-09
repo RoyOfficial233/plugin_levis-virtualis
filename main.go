@@ -509,13 +509,18 @@ func (p *virtualisPlugin) GetOrder(ctx context.Context, req *pb.GetOrderRequest)
 	}, nil
 }
 
-// v1Status 把上游实例状态映射成 Levis 服务状态口径。
+// v1Status maps upstream instance status literals to the Levis service
+// status vocabulary. `stopped` must pass through verbatim: Levis gates paid
+// resize flows on seeing stopped/off, and remapping it to suspended made the
+// entire change feature unreachable even when the instance was shut down.
+// `error` keeps mapping to suspended (Levis treats it as not-running but
+// degraded); unknown/boot transitional states stay pending.
 func v1Status(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "running":
 		return "active"
 	case "stopped":
-		return "suspended"
+		return "stopped"
 	case "error":
 		return "suspended"
 	default:
@@ -545,25 +550,26 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 		return &pb.ManageHostReply{Success: true}, nil
 
 	case pb.HostAction_HOST_ACTION_SUSPEND, pb.HostAction_HOST_ACTION_SHUTDOWN:
-		return p.power(ctx, creds, hostID, "stop")
+		return p.power(ctx, creds, hostID, "stop", req)
 
 	case pb.HostAction_HOST_ACTION_UNSUSPEND, pb.HostAction_HOST_ACTION_BOOT:
-		return p.power(ctx, creds, hostID, "start")
+		return p.power(ctx, creds, hostID, "start", req)
 
 	case pb.HostAction_HOST_ACTION_REBOOT:
-		return p.power(ctx, creds, hostID, "restart")
+		return p.power(ctx, creds, hostID, "restart", req)
 
 	case pb.HostAction_HOST_ACTION_HARD_BOOT:
-		return p.power(ctx, creds, hostID, "hard_start")
+		return p.power(ctx, creds, hostID, "hard_start", req)
 
 	case pb.HostAction_HOST_ACTION_HARD_STOP:
-		return p.power(ctx, creds, hostID, "hard_stop")
+		return p.power(ctx, creds, hostID, "hard_stop", req)
 
 	case pb.HostAction_HOST_ACTION_HARD_RESTART:
-		return p.power(ctx, creds, hostID, "hard_restart")
+		return p.power(ctx, creds, hostID, "hard_restart", req)
 
 	case pb.HostAction_HOST_ACTION_TERMINATE:
-		if err := p.apiDoTimeout(ctx, http.MethodDelete, creds, "/instances/"+hostID+"/purge", nil, nil, recoveryTimeout); err != nil {
+		ctx = withOperationID(ctx, req.GetOperationId())
+		if err := p.apiDoTimeout(ctx, http.MethodDelete, creds, "/instances/"+hostID+"/purge", nil, nil, manageTimeout(req.GetAction())); err != nil {
 			// Only a structured resource-not-found is idempotent; a missing
 			// route on an older master must not silently fall back to soft delete.
 			if !resourceNotFound(err) {
@@ -577,7 +583,7 @@ func (p *virtualisPlugin) ManageHost(ctx context.Context, req *pb.ManageHostRequ
 		if osID == "" || osID == "0" {
 			return &pb.ManageHostReply{Error: "重装系统必须指定镜像 ID"}, nil
 		}
-		return p.powerWithImage(ctx, creds, hostID, "reinstall", osID)
+		return p.powerWithImage(ctx, creds, hostID, "reinstall", osID, req)
 
 	default:
 		if req.GetAction() == pb.HostAction_HOST_ACTION_UNSPECIFIED {
@@ -605,9 +611,12 @@ func parseTrafficTopUp(osField string) (int, bool) {
 	return value, true
 }
 
-// power 执行电源操作并轮询确认（上游 PowerInstance 同步等待结果）。
-func (p *virtualisPlugin) power(ctx context.Context, creds *credentials, hostID, action string) (*pb.ManageHostReply, error) {
-	if err := p.apiPost(ctx, creds, "/instances/"+hostID+"/power", map[string]any{"action": action}, nil); err != nil {
+// power runs a power operation. The Levis operation ID (when present) rides
+// along as X-Levis-Operation-ID so upstream logs correlate customer-visible
+// actions with plugin mutations.
+func (p *virtualisPlugin) power(ctx context.Context, creds *credentials, hostID, action string, req *pb.ManageHostRequest) (*pb.ManageHostReply, error) {
+	ctx = withOperationID(ctx, req.GetOperationId())
+	if err := p.apiDoTimeout(ctx, http.MethodPost, creds, "/instances/"+hostID+"/power", map[string]any{"action": action}, nil, manageTimeout(req.GetAction())); err != nil {
 		// Older Virtualis masters only know the soft action names. Preserve a
 		// useful compatibility fallback for hard boot, which is equivalent there.
 		if action == "hard_start" {
@@ -620,12 +629,14 @@ func (p *virtualisPlugin) power(ctx context.Context, creds *credentials, hostID,
 	return &pb.ManageHostReply{Success: true}, nil
 }
 
-func (p *virtualisPlugin) powerWithImage(ctx context.Context, creds *credentials, hostID, action, imageID string) (*pb.ManageHostReply, error) {
+func (p *virtualisPlugin) powerWithImage(ctx context.Context, creds *credentials, hostID, action, imageID string, req *pb.ManageHostRequest) (*pb.ManageHostReply, error) {
 	id, err := strconv.ParseUint(imageID, 10, 64)
 	if err != nil || id == 0 {
 		return &pb.ManageHostReply{Error: "镜像 ID 无效"}, nil
 	}
-	if err := p.apiPost(ctx, creds, "/instances/"+hostID+"/power", map[string]any{"action": action, "image_id": id}, nil); err != nil {
+	// Reinstall replaces the guest disk and can take hours on slow agents.
+	ctx = withOperationID(ctx, req.GetOperationId())
+	if err := p.apiDoTimeout(ctx, http.MethodPost, creds, "/instances/"+hostID+"/power", map[string]any{"action": action, "image_id": id}, nil, manageTimeout(req.GetAction())); err != nil {
 		return &pb.ManageHostReply{Error: err.Error()}, nil
 	}
 	return &pb.ManageHostReply{Success: true}, nil
@@ -690,7 +701,10 @@ func (p *virtualisPlugin) GetHost(ctx context.Context, req *pb.GetHostRequest) (
 	return &pb.GetHostReply{
 		Host: &pb.UpstreamHost{
 			Id: req.GetHostId(), ProductName: fmt.Sprintf("%s（%s）", name, spec),
-			Status: v1Status(instance.Status), Actions: []string{"boot", "shutdown", "reboot", "hard_boot", "hard_stop", "hard_restart", "reinstall"},
+			// resize is advertised unconditionally: the upstream master ships
+			// PATCH /api/v1/instances/:id/spec, so the capability is real for
+			// every reachable instance. Levis still gates plan changes on it.
+			Status: v1Status(instance.Status), Actions: []string{"boot", "shutdown", "reboot", "hard_boot", "hard_stop", "hard_restart", "reinstall", "resize"},
 			Resources: resources, Network: network, Ssh: ssh,
 			Cpu: int32(instance.Spec.CPU), CpuMilli: int32(instance.Spec.CPUMilli),
 			MemoryMb: int64(instance.Spec.MemoryMB), DiskGb: int64(instance.Spec.DiskGB),

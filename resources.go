@@ -12,6 +12,16 @@ import (
 
 type operationIDKey struct{}
 
+// withOperationID attaches the Levis operation ID to the context so every
+// mutating upstream call stamps X-Levis-Operation-ID. An empty or malformed
+// ID is dropped (header omitted) rather than forging correlation.
+func withOperationID(ctx context.Context, id string) context.Context {
+	if id == "" || !validOperationID(id) {
+		return ctx
+	}
+	return context.WithValue(ctx, operationIDKey{}, id)
+}
+
 func validOperationID(id string) bool {
 	if len(id) > 128 {
 		return false
@@ -94,11 +104,11 @@ func (p *virtualisPlugin) resizeHost(ctx context.Context, creds *credentials, re
 	current.Network["bandwidth_mbps"] = json.RawMessage(fmt.Sprint(req.GetResources().GetBandwidthMbps()))
 	current.Network["traffic_gb"] = json.RawMessage(fmt.Sprint(req.GetResources().GetTrafficGb()))
 	body := map[string]any{"spec": spec, "network": current.Network}
-	ctx = context.WithValue(ctx, operationIDKey{}, req.GetOperationId())
+	ctx = withOperationID(ctx, req.GetOperationId())
 	var updated struct {
 		ID uint64 `json:"id"`
 	}
-	if err := p.apiDoTimeout(ctx, http.MethodPatch, creds, "/instances/"+req.GetHostId()+"/spec", body, &updated, recoveryTimeout); err != nil {
+	if err := p.apiDoTimeout(ctx, http.MethodPatch, creds, "/instances/"+req.GetHostId()+"/spec", body, &updated, manageTimeout(req.GetAction())); err != nil {
 		return &pb.ManageHostReply{Error: err.Error()}, nil
 	}
 	if decimalID(updated.ID) != req.GetHostId() {
