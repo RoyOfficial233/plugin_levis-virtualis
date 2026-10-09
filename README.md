@@ -45,3 +45,73 @@ build.cmd    # Windows（双击或 cmd 运行），产物同上
 - 删除服务会同步删除上游实例
 - 续费仅顺延本地周期（Virtualis 不做上游计费）
 - 重装系统暂不支持，请在上游操作
+
+## Capabilities & status semantics (2026-10 audit fixes)
+
+This section documents the wire contract changes shipped after the 2026-10
+plugin boundary audit. Consumers of `GetHost`/`GetOrder`/`HostOperation`
+should treat these as the current authoritative semantics.
+
+### `resize` is now advertised (PLG-F02 / MONEY-06)
+
+`GetHost` includes `resize` in `Actions`. The capability is real: the upstream
+master ships `PATCH /api/v1/instances/:id/spec` (resize requires the instance
+to be `stopped`; disk shrink is rejected). Levis uses this flag to unlock paid
+upgrade/downgrade flows — previously the missing flag made the whole feature
+unreachable regardless of instance state.
+
+### Upstream `stopped` is passed through verbatim (PLG-F02 / MONEY-06)
+
+`v1Status` mapping is now:
+
+| upstream instance status | Levis service status |
+|---|---|
+| `running` | `active` |
+| `stopped` | `stopped` (was `suspended`) |
+| `error` | `suspended` |
+| anything else (`creating`, `pending`, `deleting`, …) | `pending` |
+
+`stopped` must reach Levis as `stopped` because the Levis change flow only
+accepts `stopped`/`off` as the pre-resize gate. Remapping it to `suspended`
+blocked every paid resize behind a second, unsatisfiable gate.
+
+### Recovery point statuses are forwarded unchanged (PLG-F03)
+
+Snapshots and backups keep the upstream literal `status` value (success is
+`available`). The plugin never rewrites them; the frontend keys download and
+restore controls on `available`.
+
+### Long operations use a 2h budget, the rest stay short (PLG-F04)
+
+| action | upstream HTTP timeout |
+|---|---|
+| `RESIZE`, `TERMINATE` (purge), `REINSTALL` | 2 h |
+| power actions, renew, everything else | 90 s |
+
+The same classification applies to the recovery-type `HostOperation` actions
+(snapshot/backup create/restore/delete, migrate, trash restore/purge, batch).
+
+### Every mutation carries `X-Levis-Operation-ID` (PLG-F05)
+
+All `ManageHost` change paths (resize, terminate, reinstall and power
+operations) stamp the Levis request's `operation_id` as `X-Levis-Operation-ID`
+when one is present and well-formed, so upstream operation logs can be
+reconciled with Levis service-change records. No ID in the request → header
+omitted.
+
+### Error categories survive to the reply (PLG-F06)
+
+Transport-level failures return typed gRPC status errors (`DeadlineExceeded`,
+`Canceled`, …) and upstream HTTP failures embed both the status code and the
+structured upstream `code` in the reply error text, so the Levis host can map
+categories (not found / forbidden / rate limited / timeout) instead of
+guessing. Plugin-side redaction of credentials and upstream URLs in error
+messages is unchanged.
+
+### Secret redaction is decode-aware (PLG-F07)
+
+Feature payloads are redacted by decoding the JSON, replacing the API key and
+upstream base URL inside every decoded string (objects, arrays, nested), and
+re-encoding. Values containing `"` `\` `&` can no longer survive redaction
+because JSON escaping happens after replacement, not before.
+
