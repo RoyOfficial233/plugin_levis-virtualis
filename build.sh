@@ -35,27 +35,31 @@ else
   exit 1
 fi
 
-rm -rf dist
-mkdir -p dist
+OUT_DIR="${PLUGIN_DIST_DIR:-dist}"
+[[ "$OUT_DIR" != / && "$OUT_DIR" != . && "$OUT_DIR" != .. ]] || exit 1
+mkdir -p "$OUT_DIR/.build"
+"$PYTHON" .github/scripts/plugin_inputs.py "$OUT_DIR/build-inputs.json"
+if [[ -n "${PLUGIN_PLATFORMS:-}" ]]; then read -r -a PLATFORMS <<< "$PLUGIN_PLATFORMS"; fi
 
 for platform in "${PLATFORMS[@]}"; do
   os="${platform%%/*}"
   arch="${platform##*/}"
 
   echo "构建 ${os}/${arch} ..."
-  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o "dist/.build/plugin" -ldflags='-s -w' .
+  CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -mod=readonly -trimpath -o "$OUT_DIR/.build/plugin" -ldflags='-s -w' .
 
-  stage="dist/.build/${ID}"
+  stage="$OUT_DIR/.build/${ID}"
   rm -rf "$stage"
   mkdir -p "$stage/frontend"
-  cp "dist/.build/plugin" "$stage/plugin"
+  cp "$OUT_DIR/.build/plugin" "$stage/plugin"
   cp frontend/index.html "$stage/frontend/index.html"
 
-  zip="dist/${ID}-${os}-${arch}.zip"
+  zip="$OUT_DIR/${ID}-${os}-${arch}.zip"
   "$PYTHON" scripts/package.py "$stage" "$zip"
-  rm -rf "$stage" "dist/.build/plugin"
+  rm -rf "$stage" "$OUT_DIR/.build/plugin"
   echo "  -> $zip"
 done
 
-rm -rf dist/.build
+"$PYTHON" .github/scripts/plugin_inputs.py "$OUT_DIR/build-inputs.json" --verify
+rm -rf "$OUT_DIR/.build"
 printf '完成：dist/virtualis-<os>-<arch>.zip\n'
